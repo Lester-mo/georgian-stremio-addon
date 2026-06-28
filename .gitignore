@@ -1,0 +1,7 @@
+node_modules/
+*.log
+addon.out.log
+addon.err.log
+addon.log
+.env
+.DS_Store

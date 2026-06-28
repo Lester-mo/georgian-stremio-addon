@@ -1,0 +1,18 @@
+# Render Blueprint — auto-configures the free web service when you connect this repo.
+# Docs: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: georgian-stredio-addon
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    # The addon answers /manifest.json with 200 once it's up.
+    healthCheckPath: /manifest.json
+    autoDeploy: true
+    envVars:
+      # The in-addon stream proxy derives its public URL from the request Host on
+      # Render automatically, so PUBLIC_URL is OPTIONAL. If streams ever come back
+      # as raw CDN links, set PUBLIC_URL to your full https://<name>.onrender.com URL.
+      - key: PUBLIC_URL
+        sync: false

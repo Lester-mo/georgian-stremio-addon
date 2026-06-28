@@ -16,3 +16,8 @@ services:
       # as raw CDN links, set PUBLIC_URL to your full https://<name>.onrender.com URL.
       - key: PUBLIC_URL
         sync: false
+      # Cloudflare Worker that relays the non-IP-locked sources (ge.movie, UAFlix)
+      # so their video bytes use Cloudflare's unmetered bandwidth instead of
+      # Render's quota. HDRezka stays on the origin (it's IP-locked to this server).
+      - key: WORKER_PROXY
+        value: https://stredio-stream.shonomusicofficial.workers.dev

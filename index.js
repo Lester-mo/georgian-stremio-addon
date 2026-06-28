@@ -165,6 +165,12 @@ const UA = HEADERS['User-Agent'];
 // ─────────────────────────────────────────
 const als = new AsyncLocalStorage();
 const PUBLIC_URL = (process.env.PUBLIC_URL || '').replace(/\/+$/, '');
+// Optional Cloudflare Worker stream relay (unmetered bandwidth). When set, the
+// Referer-gated-but-NOT-IP-locked sources (ge.movie/em.filmx, UAFlix/zetvideo)
+// stream through it instead of this origin, keeping their bytes off the host's
+// bandwidth quota. HDRezka/voidboost is IP-locked to THIS server, so it must
+// NOT use the Worker (it stays on the self /proxy below).
+const WORKER_PROXY = (process.env.WORKER_PROXY || '').replace(/\/+$/, '');
 
 // Resolve the public origin to embed in proxied stream URLs: prefer PUBLIC_URL
 // (set it to the tunnel's https URL), else derive from the incoming request.
@@ -195,6 +201,17 @@ function proxify(url, referer) {
   const base = store && store.baseUrl;
   if (!base) return url;
   return `${base}/proxy?d=${encodeProxy(url, referer)}`;
+}
+
+// Route a stream through the Cloudflare Worker relay (matches the Worker's
+// /stream-proxy?src=&ref=&t=hls contract) so its bytes don't count against this
+// host's bandwidth. Only for sources confirmed NOT IP-locked (ge.movie, UAFlix).
+// Falls back to the self proxy when no Worker is configured.
+function workerProxify(url, referer, isHls) {
+  if (!url) return url;
+  if (!WORKER_PROXY) return proxify(url, referer);
+  return `${WORKER_PROXY}/stream-proxy?src=${encodeURIComponent(url)}` +
+    `&ref=${encodeURIComponent(referer || '')}${isHls ? '&t=hls' : ''}`;
 }
 
 const HLS_RE = /\.m3u8(\?|$)/i;
@@ -573,7 +590,7 @@ function qualityScore(q) {
 // Russian otherwise). MP4 quality (HD/SD) is collapsed to the best one.
 function gemToStremio(resolved) {
   const streams = [];
-  const subsOf = r => (r.subtitles || []).map((s, i) => ({ id: 'gm' + i, url: proxify(s.url, r.referer), lang: s.lang }));
+  const subsOf = r => (r.subtitles || []).map((s, i) => ({ id: 'gm' + i, url: workerProxify(s.url, r.referer, false), lang: s.lang }));
 
   const mp4 = resolved.filter(r => r.kind === 'mp4' && r.lang === 'ka').sort((a, b) => qualityScore(b.quality) - qualityScore(a.quality));
   if (mp4.length) {
@@ -581,7 +598,7 @@ function gemToStremio(resolved) {
     streams.push({
       name: '🇬🇪 ge.movie',
       title: `🇬🇪 ქართული აუდიო${r.quality ? ' · ' + r.quality : ''}`,
-      url: proxify(r.url, r.referer),
+      url: workerProxify(r.url, r.referer, false),
       subtitles: subsOf(r),
       behaviorHints: { notWebReady: false, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'mp4', lang: 'ka', audioLang: 'ka' },
     });
@@ -590,7 +607,7 @@ function gemToStremio(resolved) {
     streams.push({
       name: '🇬🇪 ge.movie · HLS',
       title: '🇬🇪 ქართული აუდიო',
-      url: proxify(r.url, r.referer),
+      url: workerProxify(r.url, r.referer, true),
       subtitles: subsOf(r),
       behaviorHints: { notWebReady: true, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'hls', lang: 'ka', audioLang: 'ka' },
     });
@@ -603,7 +620,7 @@ function gemToStremio(resolved) {
 // player selects the English rendition of a multi-audio master.
 function gemEnglishToStremio(resolved) {
   const streams = [];
-  const subsOf = r => (r.subtitles || []).map((s, i) => ({ id: 'gm' + i, url: proxify(s.url, r.referer), lang: s.lang }));
+  const subsOf = r => (r.subtitles || []).map((s, i) => ({ id: 'gm' + i, url: workerProxify(s.url, r.referer, false), lang: s.lang }));
 
   const mp4 = resolved.filter(r => r.kind === 'mp4' && r.lang === 'en').sort((a, b) => qualityScore(b.quality) - qualityScore(a.quality));
   if (mp4.length) {
@@ -611,7 +628,7 @@ function gemEnglishToStremio(resolved) {
     streams.push({
       name: '🇬🇧 ge.movie',
       title: `🇬🇧 English${r.quality ? ' · ' + r.quality : ''}`,
-      url: proxify(r.url, r.referer),
+      url: workerProxify(r.url, r.referer, false),
       subtitles: subsOf(r),
       behaviorHints: { notWebReady: false, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'mp4', lang: 'en', audioLang: 'en' },
     });
@@ -620,7 +637,7 @@ function gemEnglishToStremio(resolved) {
     streams.push({
       name: '🇬🇧 ge.movie · HLS',
       title: '🇬🇧 English',
-      url: proxify(r.url, r.referer),
+      url: workerProxify(r.url, r.referer, true),
       subtitles: subsOf(r),
       behaviorHints: { notWebReady: true, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'hls', lang: 'en', audioLang: 'en' },
     });
@@ -900,7 +917,7 @@ function uafixToStremio(streams) {
   return [{
     name: '🇺🇦 UAFlix',
     title: '🇺🇦 Українською',
-    url: proxify(streams[0].url, ZET_REF),
+    url: workerProxify(streams[0].url, ZET_REF, true),
     behaviorHints: { notWebReady: true, proxyHeaders: { request: { Referer: ZET_REF, 'User-Agent': UA } }, streamType: 'hls', lang: 'uk', audioLang: 'uk' },
   }];
 }
@@ -926,7 +943,7 @@ async function uafixEnglish(name, year, type, season, episode) {
     return [{
       name: '🇬🇧 UAFlix',
       title: '🇬🇧 English',
-      url: proxify(file, ZET_REF),
+      url: workerProxify(file, ZET_REF, true),
       behaviorHints: { notWebReady: true, proxyHeaders: { request: { Referer: ZET_REF, 'User-Agent': UA } }, streamType: 'hls', lang: 'en', audioLang: 'en' },
     }];
   } catch { return []; }
@@ -1137,5 +1154,6 @@ app.listen(PORT, () => {
   console.log(`🇬🇪 Georgian Stremio Addon v${manifest.version} running on http://localhost:${PORT}`);
   console.log(`📦 Install URL: http://localhost:${PORT}/manifest.json`);
   console.log(`🌐 PUBLIC_URL: ${PUBLIC_URL || '(unset — using request Host for /proxy links)'}`);
+  console.log(`☁️  WORKER_PROXY: ${WORKER_PROXY || '(unset — ge.movie/UAFlix use this origin)'}`);
   console.log(`🔗 Sources (priority order): ${SOURCES.join(', ')}`);
 });

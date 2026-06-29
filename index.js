@@ -1044,23 +1044,21 @@ function relabelOriginal(rows, code) {
   }));
 }
 
-// English (en) cascade. HDRezka's "Оригинал" track is the original audio — English
-// only when the title's original language is English (looked up via TMDB). So:
-//   • English-origin title → HDRezka original IS English → use it; else fall to
-//     ge.movie → UAFlix for an English-audio rendition.
-//   • Non-English-origin title → prefer a REAL English dub (ge.movie → UAFlix);
-//     only if none exists, surface HDRezka's original track RELABELLED "Original
-//     · <Language>" rather than mislabel it English.
+// English (en) cascade — ORDERED to keep English bytes off the origin's bandwidth.
+// ge.movie and UAFlix stream through the Cloudflare Worker (unmetered), so we try
+// them FIRST; HDRezka (origin-bound, IP-locked to this server) is the last resort.
+//   • ge.movie English track → UAFlix English → HDRezka "Оригинал".
+//   • HDRezka's original is real English only when the title's original language IS
+//     English (TMDB); for a non-English-origin title with no real English dub it is
+//     surfaced RELABELLED "Original · <Language>" rather than mislabelled English.
+// This means when ge.movie/UAFlix carry an English track we never touch HDRezka,
+// shifting most English traffic onto the Worker.
 async function resolveEnglishCascade(meta, type, season, episode) {
   const { name, year, tmdb } = meta;
   const origLang = await tmdbOriginalLang(tmdb, type);   // 'en' | 'ko' | … | null
   const englishOrigin = !origLang || origLang === 'en';  // null (unknown) → treat as English
 
-  // HDRezka original track (resolved once; meaning depends on origin language).
-  const rez = name ? await rezkaEnglish(name, year, type, season, episode).catch(() => []) : [];
-  if (englishOrigin && rez.length) return rez;           // genuine English audio
-
-  // Real English-audio dub from ge.movie, then UAFlix.
+  // Worker-able English first: ge.movie, then UAFlix.
   if (tmdb) {
     const en = gemEnglishToStremio(await gemEnglish(tmdb, type, season, episode).catch(() => []));
     if (en.length) return en;
@@ -1070,8 +1068,9 @@ async function resolveEnglishCascade(meta, type, season, episode) {
     if (en.length) return en;
   }
 
-  // No English dub found. For a non-English-origin title, offer the HDRezka
-  // original audio honestly labelled as Original; for English-origin, nothing.
+  // Last resort: HDRezka's original track (origin-bound). For an English-origin
+  // title that IS the English audio; otherwise relabel it honestly as Original.
+  const rez = name ? await rezkaEnglish(name, year, type, season, episode).catch(() => []) : [];
   if (rez.length) return englishOrigin ? rez : relabelOriginal(rez, origLang);
   return [];
 }

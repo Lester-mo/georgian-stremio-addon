@@ -8,9 +8,9 @@ const fetch = require('node-fetch');
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '3.0.0',
-  name: '🇬🇪 Georgian / Ukrainian / English Dubbed',
-  description: 'Dubbed movies & series — 🇬🇪 Georgian (ge.movie) · 🇺🇦 Ukrainian (UAFlix) · 🇬🇧 English (ge.movie / UAFlix / kkphim)',
+  version: '3.1.0',
+  name: '🇬🇪 Georgian / Russian / Ukrainian / English Dubbed',
+  description: 'Dubbed movies & series — 🇬🇪 Georgian · 🇷🇺 Russian · 🇺🇦 Ukrainian · 🇬🇧 English (ge.movie · UAFlix · kkphim)',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
   resources: ['stream', 'catalog', 'meta'],
   types: ['movie', 'series'],
@@ -496,19 +496,32 @@ async function gemEpisode(tmdbId, season, episode) {
   try { return gemKeepGeorgian(await gemResolveItem('series', tmdbId, season, episode)); } catch { return []; }
 }
 
-// English fallback from em.filmx.my: keep ONLY English-audio entries — an MP4
-// labelled English ({ინგლისურად}/English), or an HLS master that carries an
-// English EXT-X-MEDIA audio rendition (recorded so the player selects it).
+// English from em.filmx.my: keep ONLY English-audio entries — an MP4 labelled
+// English ({ინგლისურად}/English), or an HLS master that carries an English
+// EXT-X-MEDIA audio rendition (recorded so the player selects it).
 async function gemEnglish(tmdbId, type, season, episode) {
+  return gemKeepLang(tmdbId, type, season, episode, 'en');
+}
+
+// Russian from em.filmx.my (same multi-audio source as Georgian/English). Russian
+// comes ONLY from ge.movie now — if a title has no Russian track here, Russian is
+// simply omitted (no other Russian source).
+async function gemRussian(tmdbId, type, season, episode) {
+  return gemKeepLang(tmdbId, type, season, episode, 'ru');
+}
+
+// Resolve the em.filmx.my item and keep only entries carrying the requested audio
+// language (mp4 tagged that language, or an HLS master with that EXT-X-MEDIA rendition).
+async function gemKeepLang(tmdbId, type, season, episode, code) {
   try {
     const resolved = await gemResolveItem(type, tmdbId, season, episode);
     const out = [];
     for (const r of resolved) {
       if (r.kind === 'mp4') {
-        if (r.lang === 'en') out.push(r);
+        if (r.lang === code) out.push(r);
       } else if (r.kind === 'hls') {
         const langs = await hlsAudioLangs(r.url);
-        if (langs.includes('en')) out.push({ ...r, audioLangs: langs });
+        if (langs.includes(code)) out.push({ ...r, audioLangs: langs });
       }
     }
     return out;
@@ -582,6 +595,36 @@ function gemEnglishToStremio(resolved) {
       url: workerProxify(r.url, r.referer, true),
       subtitles: subsOf(r),
       behaviorHints: { notWebReady: true, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'hls', lang: 'en', audioLang: 'en' },
+    });
+  }
+  return streams;
+}
+
+// Wrap em.filmx.my Russian-audio streams as 🇷🇺 rows (lang/audioLang 'ru'). MP4 is
+// collapsed to the best quality; an HLS master carries audioLang:'ru' so the
+// player selects the Russian rendition of a multi-audio master.
+function gemRussianToStremio(resolved) {
+  const streams = [];
+  const subsOf = r => (r.subtitles || []).map((s, i) => ({ id: 'gm' + i, url: workerProxify(s.url, r.referer, false), lang: s.lang }));
+
+  const mp4 = resolved.filter(r => r.kind === 'mp4' && r.lang === 'ru').sort((a, b) => qualityScore(b.quality) - qualityScore(a.quality));
+  if (mp4.length) {
+    const r = mp4[0];
+    streams.push({
+      name: '🇷🇺 ge.movie',
+      title: `🇷🇺 Русский${r.quality ? ' · ' + r.quality : ''}`,
+      url: workerProxify(r.url, r.referer, false),
+      subtitles: subsOf(r),
+      behaviorHints: { notWebReady: false, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'mp4', lang: 'ru', audioLang: 'ru' },
+    });
+  }
+  for (const r of resolved.filter(r => r.kind === 'hls')) {
+    streams.push({
+      name: '🇷🇺 ge.movie · HLS',
+      title: '🇷🇺 Русский',
+      url: workerProxify(r.url, r.referer, true),
+      subtitles: subsOf(r),
+      behaviorHints: { notWebReady: true, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'hls', lang: 'ru', audioLang: 'ru' },
     });
   }
   return streams;
@@ -747,10 +790,13 @@ function kkKeywords(name) {
 
 const kkNorm = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
 
-// Find the kkphim detail doc for this title. Tier 1: exact TMDB id (search payload
-// carries tmdb.id). Tier 2 (for older entries whose tmdb is null): exact English
-// title + exact year — strict enough to avoid wrong-title/remake mismatches.
-async function kkFind(name, tmdbId, year) {
+// Find the kkphim detail doc for this title.
+//   Movies — Tier 1: exact TMDB id (search payload carries tmdb.id); Tier 2 (older
+//     entries whose tmdb is null): exact English title + year.
+//   Series — kkphim splits shows per season as origin_name "Title (Season N)" with
+//     tmdb null, so we match exact "<title> season <N>" (or the bare title for a
+//     single-season show on S1). Episode is then picked from server_data by number.
+async function kkFind(name, tmdbId, year, wantSeries, season) {
   if (!name) return null;
   const wantName = kkNorm(name);
   for (const kw of kkKeywords(name)) {
@@ -759,8 +805,19 @@ async function kkFind(name, tmdbId, year) {
       const j = await getJson(`${KKPHIM_API}/v1/api/tim-kiem?keyword=${encodeURIComponent(kw)}&limit=20`, 9000);
       items = (j && j.data && j.data.items) || [];
     } catch { continue; }
-    const hit = (tmdbId && items.find(it => it.tmdb && String(it.tmdb.id) === String(tmdbId)))
-      || (year && items.find(it => kkNorm(it.origin_name) === wantName && String(it.year) === String(year)));
+
+    let hit;
+    if (wantSeries) {
+      const ser = items.filter(it => it.type !== 'single');
+      const wantSeason = kkNorm(`${name} season ${season}`);
+      const seasonRe = new RegExp(`season0*${season}(?!\\d)`);
+      hit = ser.find(it => kkNorm(it.origin_name) === wantSeason)
+        || ser.find(it => kkNorm(it.origin_name).startsWith(wantName) && seasonRe.test(kkNorm(it.origin_name)))
+        || (season === 1 && ser.find(it => kkNorm(it.origin_name) === wantName));
+    } else {
+      hit = (tmdbId && items.find(it => it.tmdb && String(it.tmdb.id) === String(tmdbId)))
+        || (year && items.find(it => kkNorm(it.origin_name) === wantName && String(it.year) === String(year)));
+    }
     if (hit) {
       const d = await getJson(`${KKPHIM_API}/phim/${encodeURIComponent(hit.slug)}`, 9000).catch(() => null);
       if (d && d.movie) return d;
@@ -772,7 +829,7 @@ async function kkFind(name, tmdbId, year) {
 // Resolve the kkphim original-audio (English) m3u8 for a movie or episode.
 async function kkphimEnglish(name, tmdbId, year, type, season, episode) {
   try {
-    const d = await kkFind(name, tmdbId, year);
+    const d = await kkFind(name, tmdbId, year, type === 'series', season);
     if (!d) return [];
     const servers = d.episodes || [];
     const orig = servers.find(s => kkIsOriginalServer(s.server_name)) || servers[0];
@@ -880,10 +937,9 @@ builder.defineMetaHandler(async ({ type, id }) => {
   }
 });
 
-// English (en) cascade. All sources here stream through the Cloudflare Worker
-// (unmetered), so nothing English touches the origin:
-//   ge.movie English track → UAFlix English → kkphim (original audio; last because
-//   some titles carry burned-in Vietnamese subtitles).
+// English (en) cascade. Primary is ge.movie's English track; when ge.movie has no
+// English audio, fall back to kkphim (original audio, may carry burned-in VN subs).
+// Both stream through the Cloudflare Worker, so English never touches the origin.
 async function resolveEnglishCascade(meta, type, season, episode) {
   const { name, year, tmdb } = meta;
 
@@ -891,11 +947,6 @@ async function resolveEnglishCascade(meta, type, season, episode) {
     const en = gemEnglishToStremio(await gemEnglish(tmdb, type, season, episode).catch(() => []));
     if (en.length) return en;
   }
-  if (name) {
-    const en = await uafixEnglish(name, year, type, season, episode).catch(() => []);
-    if (en.length) return en;
-  }
-  // Final fallback: kkphim original audio (English, possibly with burned-in VN subs).
   if (name && (tmdb || year)) {
     const kk = await kkphimEnglish(name, tmdb, year, type, season, episode).catch(() => []);
     if (kk.length) return kk;
@@ -911,9 +962,9 @@ builder.defineStreamHandler(async ({ type, id }) => {
     if (type !== 'movie' && type !== 'series') return { streams: [] };
 
     // One id → title/year/tmdb, then resolve the language sources in parallel:
-    //   ka → ge.movie (tmdb) · uk → UAFlix · en → cascade (ge.movie → UAFlix →
-    //   kkphim). Every source streams through the Cloudflare Worker, so nothing
-    //   here touches the origin's bandwidth.
+    //   ka → ge.movie · ru → ge.movie ONLY (omitted if absent) · uk → UAFlix ·
+    //   en → ge.movie English, else kkphim. Every source streams through the
+    //   Cloudflare Worker, so nothing here touches the origin's bandwidth.
     const baseId = type === 'series' ? id.split(':')[0] : id;
     const season = type === 'series' ? parseInt(id.split(':')[1] || '1', 10) : 1;
     const episode = type === 'series' ? parseInt(id.split(':')[2] || '1', 10) : 1;
@@ -921,17 +972,19 @@ builder.defineStreamHandler(async ({ type, id }) => {
     const meta = await metaForId(baseId, type);
     const { name, year, tmdb } = meta;
 
-    const [ka, uk, en] = await Promise.all([
+    const [ka, ru, uk, en] = await Promise.all([
       tmdb ? (type === 'series' ? gemEpisode(tmdb, season, episode) : gemMovie(tmdb)) : Promise.resolve([]),
+      tmdb ? gemRussian(tmdb, type, season, episode) : Promise.resolve([]),
       name ? uafixResolve(name, year, type, season, episode) : Promise.resolve([]),
       resolveEnglishCascade({ name, year, tmdb }, type, season, episode),
     ]);
 
     return {
       streams: [
-        ...en,                   // 🇬🇧 English (ge.movie → UAFlix → kkphim)
-        ...gemToStremio(ka),     // 🇬🇪 Georgian
-        ...uafixToStremio(uk),   // 🇺🇦 Ukrainian
+        ...en,                       // 🇬🇧 English (ge.movie → kkphim)
+        ...gemToStremio(ka),         // 🇬🇪 Georgian (ge.movie)
+        ...gemRussianToStremio(ru),  // 🇷🇺 Russian (ge.movie only)
+        ...uafixToStremio(uk),       // 🇺🇦 Ukrainian (UAFlix)
       ],
     };
   } catch (e) {

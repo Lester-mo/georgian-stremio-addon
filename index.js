@@ -2,17 +2,15 @@ const { addonBuilder, getRouter } = require('stremio-addon-sdk');
 const express = require('express');
 const { AsyncLocalStorage } = require('async_hooks');
 const fetch = require('node-fetch');
-const fs = require('fs');
-const path = require('path');
 
 // ─────────────────────────────────────────
 //  MANIFEST
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '2.3.0',
-  name: '🇬🇪 Georgian / Russian / Ukrainian Dubbed',
-  description: 'Dubbed movies & series — 🇬🇪 Georgian (ge.movie) · 🇷🇺 Russian (HDRezka) · 🇺🇦 Ukrainian (UAFlix)',
+  version: '3.0.0',
+  name: '🇬🇪 Georgian / Ukrainian / English Dubbed',
+  description: 'Dubbed movies & series — 🇬🇪 Georgian (ge.movie) · 🇺🇦 Ukrainian (UAFlix) · 🇬🇧 English (ge.movie / UAFlix / kkphim)',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
   resources: ['stream', 'catalog', 'meta'],
   types: ['movie', 'series'],
@@ -269,62 +267,6 @@ async function handleProxy(req, res) {
   if (!up.headers.get('accept-ranges')) res.setHeader('Accept-Ranges', 'bytes');
   up.body.on('error', () => { try { res.end(); } catch { /* client gone */ } });
   up.body.pipe(res);
-}
-
-// ─────────────────────────────────────────
-//  TMDB original-language lookup — used to label HDRezka's "Оригинал" track
-//  correctly: it's only English when the title's original language IS English;
-//  otherwise it's that original language and must be tagged "Original", not
-//  "English". The TMDB credential lives in the sibling STREAMFULL server/.env
-//  (TMDB_BEARER preferred, else TMDB_API_KEY); we read it best-effort. With no
-//  credential or on any failure we return null → caller treats it as English
-//  (safe default for the mostly-Hollywood catalog).
-// ─────────────────────────────────────────
-function readSiblingEnv() {
-  const out = {};
-  try {
-    const p = path.join(__dirname, '..', 'Movie Website', 'server', '.env');
-    if (!fs.existsSync(p)) return out;
-    for (const line of fs.readFileSync(p, 'utf8').split(/\r?\n/)) {
-      if (/^\s*#/.test(line)) continue;
-      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/i);
-      if (m) out[m[1]] = m[2].trim().replace(/^["']|["']$/g, '');
-    }
-  } catch { /* ignore — degrade to English */ }
-  return out;
-}
-const _siblingEnv = readSiblingEnv();
-const TMDB_BEARER = (process.env.TMDB_BEARER || _siblingEnv.TMDB_BEARER || '').trim();
-const TMDB_KEY = (process.env.TMDB_API_KEY || _siblingEnv.TMDB_API_KEY || '').trim();
-
-// ISO-639-1 → display name (the few we're likely to meet; fall back to the code).
-const LANG_NAMES = {
-  en: 'English', ko: 'Korean', ja: 'Japanese', zh: 'Chinese', fr: 'French',
-  es: 'Spanish', de: 'German', it: 'Italian', pt: 'Portuguese', hi: 'Hindi',
-  ru: 'Russian', tr: 'Turkish', ka: 'Georgian', uk: 'Ukrainian', pl: 'Polish',
-  sv: 'Swedish', da: 'Danish', no: 'Norwegian', fi: 'Finnish', nl: 'Dutch',
-  th: 'Thai', id: 'Indonesian', ar: 'Arabic', he: 'Hebrew', fa: 'Persian',
-};
-const langName = code => LANG_NAMES[code] || (code ? code.toUpperCase() : 'Original');
-
-const _origLangCache = new Map();
-async function tmdbOriginalLang(tmdbId, type) {
-  if (!tmdbId || (!TMDB_BEARER && !TMDB_KEY)) return null;
-  const ck = `${type}_${tmdbId}`;
-  if (_origLangCache.has(ck)) return _origLangCache.get(ck);
-  try {
-    const kind = type === 'series' ? 'tv' : 'movie';
-    const url = `https://api.themoviedb.org/3/${kind}/${encodeURIComponent(tmdbId)}` +
-      (TMDB_BEARER ? '' : `?api_key=${encodeURIComponent(TMDB_KEY)}`);
-    const headers = { 'User-Agent': UA, Accept: 'application/json' };
-    if (TMDB_BEARER) headers.Authorization = `Bearer ${TMDB_BEARER}`;
-    const res = await fetch(url, { headers, timeout: 8000 });
-    if (!res.ok) { _origLangCache.set(ck, null); return null; }
-    const j = await res.json();
-    const lang = j && j.original_language ? String(j.original_language).toLowerCase() : null;
-    _origLangCache.set(ck, lang);
-    return lang;
-  } catch { return null; }
 }
 
 // ─────────────────────────────────────────
@@ -646,182 +588,6 @@ function gemEnglishToStremio(resolved) {
 }
 
 // ─────────────────────────────────────────
-//  HDREZKA — Russian-AUDIO streams (open AJAX, no token, no Cloudflare wall on
-//  hdrezka.me). Flow: search by title → film/series page → read the post id +
-//  default (active) translator → POST /ajax/get_cdn_series → a quality-tagged
-//  stream string. Decoded (it's plaintext now, but kept trash-tolerant) into
-//  per-quality direct MP4s on the voidboost CDN. Tagged lang:'ru'.
-// ─────────────────────────────────────────
-const REZKA = 'https://hdrezka.me';
-const REZKA_REF = 'https://hdrezka.me/';
-
-// HDRezka historically base64+junk-encodes the stream string; current builds ship
-// it as plaintext ("[360p]http…"). Decode only when it isn't already plaintext.
-function rezkaClearTrash(data) {
-  if (!data) return '';
-  if (data.trim().startsWith('[')) return data;          // already plaintext
-  const trashList = ['@', '#', '!', '^', '$'];
-  const codes = [];
-  for (let len = 2; len <= 4; len++) {
-    let combos = [''];
-    for (let i = 0; i < len; i++) {
-      const next = [];
-      for (const c of combos) for (const t of trashList) next.push(c + t);
-      combos = next;
-    }
-    for (const d of combos) codes.push(Buffer.from(d, 'utf-8').toString('base64'));
-  }
-  let str = data.replace(/#h/g, '').split('//_//').join('');
-  for (const code of codes) str = str.split(code).join('');
-  try { return Buffer.from(str + '==', 'base64').toString('utf-8'); } catch { return ''; }
-}
-
-// "[360p]urlA or urlB,[480p]urlC,…" → [{quality,url}], preferring a clean .mp4
-// over the ":hls:manifest.m3u8" wrapper (seekable + browser-native).
-function rezkaParseStreams(decoded) {
-  const out = [];
-  for (const block of (decoded || '').split(',')) {
-    const m = block.match(/^\s*\[([^\]]+)\]\s*(.+)$/);
-    if (!m) continue;
-    // HDRezka wraps premium qualities in HTML (e.g. <span ...>4K<img…></span>) — strip tags.
-    const quality = m[1].replace(/<[^>]*>/g, '').trim();
-    const urls = m[2].split(' or ').map(u => u.trim()).filter(Boolean);
-    let url = urls.find(u => /\.mp4(\?|$)/i.test(u)) || urls.find(u => !/manifest\.m3u8/i.test(u)) || urls[0];
-    if (url) url = url.replace(/:hls:manifest\.m3u8.*$/i, '');
-    if (url && /^https?:/.test(url)) out.push({ quality, url });
-  }
-  return out;
-}
-
-// Title search → the best film/series page URL (year-matched when possible).
-async function rezkaSearch(name, year, wantSeries) {
-  if (!name) return null;
-  try {
-    const res = await fetch(`${REZKA}/engine/ajax/search.php`, {
-      method: 'POST',
-      headers: { 'User-Agent': UA, 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/x-www-form-urlencoded', Referer: REZKA_REF },
-      body: `q=${encodeURIComponent(name)}`, timeout: 9000,
-    });
-    if (!res.ok) return null;
-    const html = await res.text();
-    const items = [...html.matchAll(/<a href="(https?:\/\/[^"]+\.html)"[^>]*>([\s\S]*?)<\/a>/g)].map(m => ({ url: m[1], block: m[2] }));
-    if (!items.length) return null;
-    // HDRezka URL categories: /films|cartoons → movies, /series|animation → series.
-    const isSeriesUrl = u => /\/(series|animation)\//i.test(u);
-    const pool = items.filter(it => wantSeries ? isSeriesUrl(it.url) : !isSeriesUrl(it.url));
-    const list = pool.length ? pool : items;
-    const byYear = year ? list.find(it => it.block.includes(String(year))) : null;
-    return (byYear || list[0]).url;
-  } catch { return null; }
-}
-
-// Film/series page → { postId, translatorId (default Russian dub), isSeries }.
-async function rezkaPageInfo(pageUrl) {
-  try {
-    const res = await fetch(pageUrl, { headers: { 'User-Agent': UA, Accept: 'text/html', Referer: REZKA_REF }, timeout: 12000 });
-    if (!res.ok) return null;
-    const html = await res.text();
-    const postId = (html.match(/initCDN(?:Movies|Series)Events\((\d+)/) || html.match(/postId\s*[:=]\s*(\d+)/) || html.match(/data-post_id="(\d+)"/) || [])[1] || null;
-    const active = html.match(/b-translator__item[^>]*\bactive\b[^>]*data-translator_id="(\d+)"/i)
-      || html.match(/data-translator_id="(\d+)"/);
-    const translatorId = (active && active[1]) || '0';
-    const isSeries = /initCDNSeriesEvents/.test(html) || /\/(series|animation)\//i.test(pageUrl);
-    return postId ? { postId, translatorId, isSeries } : null;
-  } catch { return null; }
-}
-
-// Resolve Russian-dub streams for a movie or a specific episode.
-async function rezkaResolve(name, year, type, season, episode) {
-  try {
-    const pageUrl = await rezkaSearch(name, year, type === 'series');
-    if (!pageUrl) return [];
-    const info = await rezkaPageInfo(pageUrl);
-    if (!info || !info.postId) return [];
-    const body = type === 'series'
-      ? `id=${info.postId}&translator_id=${info.translatorId}&season=${season}&episode=${episode}&action=get_stream`
-      : `id=${info.postId}&translator_id=${info.translatorId}&action=get_movie`;
-    const r = await fetch(`${REZKA}/ajax/get_cdn_series/?t=${Date.now()}`, {
-      method: 'POST',
-      headers: { 'User-Agent': UA, 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/x-www-form-urlencoded', Referer: pageUrl },
-      body, timeout: 14000,
-    });
-    if (!r.ok) return [];
-    const j = await r.json();
-    if (!j || !j.success || !j.url) return [];
-    return rezkaParseStreams(rezkaClearTrash(j.url));
-  } catch { return []; }
-}
-
-// → Stremio rows (Russian audio), single best quality (matches ge.movie's clean
-// one-row UX). Routed through STREAMFULL's /api/stream-proxy via proxyHeaders so
-// the voidboost token (issued to the server's IP) is fetched server-side.
-function rezkaToStremio(streams) {
-  if (!streams.length) return [];
-  const best = streams.slice().sort((a, b) => qualityScore(b.quality) - qualityScore(a.quality))[0];
-  return [{
-    name: '🇷🇺 HDRezka',
-    title: `🇷🇺 Русский${best.quality ? ' · ' + best.quality : ''}`,
-    url: proxify(best.url, REZKA_REF),
-    behaviorHints: { notWebReady: false, proxyHeaders: { request: { Referer: REZKA_REF, 'User-Agent': UA } }, streamType: 'mp4', lang: 'ru', audioLang: 'ru' },
-  }];
-}
-
-// HDRezka page → the ORIGINAL-audio translator ("Оригинал (+субтитры)"). For an
-// English-language title this original track IS the English audio (HDRezka's other
-// tracks are Russian/Ukrainian dub studios). Returns { postId, translatorId }.
-async function rezkaEnglishInfo(pageUrl) {
-  try {
-    const res = await fetch(pageUrl, { headers: { 'User-Agent': UA, Accept: 'text/html', Referer: REZKA_REF }, timeout: 12000 });
-    if (!res.ok) return null;
-    const html = await res.text();
-    const postId = (html.match(/initCDN(?:Movies|Series)Events\((\d+)/) || html.match(/postId\s*[:=]\s*(\d+)/) || html.match(/data-post_id="(\d+)"/) || [])[1] || null;
-    if (!postId) return null;
-    const items = [...html.matchAll(/data-translator_id="(\d+)"[^>]*(?:title="([^"]*)")?[^>]*>\s*([^<]{0,40})/gi)]
-      .map(m => ({ id: m[1], title: (m[2] || m[3] || '').trim() }));
-    const orig = items.find(t => /ориг|original/i.test(t.title));
-    return orig ? { postId, translatorId: orig.id } : null;
-  } catch { return null; }
-}
-
-// Resolve HDRezka's original (English) audio for a movie/episode → a 🇬🇧 row.
-// Prefers a free numeric quality (360p–1080p) over premium-gated 1080p Ultra/2K/4K.
-async function rezkaEnglish(name, year, type, season, episode) {
-  try {
-    const pageUrl = await rezkaSearch(name, year, type === 'series');
-    if (!pageUrl) return [];
-    const info = await rezkaEnglishInfo(pageUrl);
-    if (!info || !info.postId) return [];
-    const body = type === 'series'
-      ? `id=${info.postId}&translator_id=${info.translatorId}&season=${season}&episode=${episode}&action=get_stream`
-      : `id=${info.postId}&translator_id=${info.translatorId}&action=get_movie`;
-    const r = await fetch(`${REZKA}/ajax/get_cdn_series/?t=${Date.now()}`, {
-      method: 'POST',
-      headers: { 'User-Agent': UA, 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/x-www-form-urlencoded', Referer: pageUrl },
-      body, timeout: 14000,
-    });
-    if (!r.ok) return [];
-    const j = await r.json();
-    if (!j || !j.success || !j.url) return [];
-    const streams = rezkaParseStreams(rezkaClearTrash(j.url));
-    if (!streams.length) return [];
-    const free = streams.filter(s => /^\d{3,4}p$/i.test(s.quality));
-    const best = (free.length ? free : streams).slice().sort((a, b) => qualityScore(b.quality) - qualityScore(a.quality))[0];
-    // English subtitles bundled with the original track, if HDRezka shipped any.
-    const subs = [];
-    if (typeof j.subtitle === 'string') {
-      for (const m of j.subtitle.matchAll(/\[([^\]]+)\](https?:\/\/[^,]+)/g)) subs.push({ id: 'rz' + subs.length, url: proxify(m[2], REZKA_REF), lang: m[1] });
-    }
-    return [{
-      name: '🇬🇧 HDRezka',
-      title: `🇬🇧 English${best.quality ? ' · ' + best.quality : ''}`,
-      url: proxify(best.url, REZKA_REF),
-      subtitles: subs,
-      behaviorHints: { notWebReady: false, proxyHeaders: { request: { Referer: REZKA_REF, 'User-Agent': UA } }, streamType: 'mp4', lang: 'en', audioLang: 'en' },
-    }];
-  } catch { return []; }
-}
-
-// ─────────────────────────────────────────
 //  UAFLIX (uafix.net) — Ukrainian-AUDIO streams via the zetvideo.net player (open
 //  HLS, no token). Flow: DLE search → film/series page → zetvideo iframe → the
 //  embed exposes file:"…/hls/index.m3u8" directly. Tagged lang:'uk'.
@@ -1114,35 +880,13 @@ builder.defineMetaHandler(async ({ type, id }) => {
   }
 });
 
-// Relabel an HDRezka original-audio row as "Original · <Language>" (not English)
-// when the title's original language is NOT English. Stays tagged lang:'en' so it
-// still surfaces under STREAMFULL's English tab as the closest-to-source option,
-// but audioLang carries the real code and the title is honest about the language.
-function relabelOriginal(rows, code) {
-  const nm = langName(code);
-  return rows.map(r => ({
-    ...r,
-    name: (r.name || '').replace('🇬🇧', '🌐'),
-    title: (r.title || '').replace('🇬🇧 English', `🌐 Original · ${nm}`),
-    behaviorHints: { ...r.behaviorHints, audioLang: code || 'original' },
-  }));
-}
-
-// English (en) cascade — ORDERED to keep English bytes off the origin's bandwidth.
-// ge.movie and UAFlix stream through the Cloudflare Worker (unmetered), so we try
-// them FIRST; HDRezka (origin-bound, IP-locked to this server) is the last resort.
-//   • ge.movie English track → UAFlix English → HDRezka "Оригинал".
-//   • HDRezka's original is real English only when the title's original language IS
-//     English (TMDB); for a non-English-origin title with no real English dub it is
-//     surfaced RELABELLED "Original · <Language>" rather than mislabelled English.
-// This means when ge.movie/UAFlix carry an English track we never touch HDRezka,
-// shifting most English traffic onto the Worker.
+// English (en) cascade. All sources here stream through the Cloudflare Worker
+// (unmetered), so nothing English touches the origin:
+//   ge.movie English track → UAFlix English → kkphim (original audio; last because
+//   some titles carry burned-in Vietnamese subtitles).
 async function resolveEnglishCascade(meta, type, season, episode) {
   const { name, year, tmdb } = meta;
-  const origLang = await tmdbOriginalLang(tmdb, type);   // 'en' | 'ko' | … | null
-  const englishOrigin = !origLang || origLang === 'en';  // null (unknown) → treat as English
 
-  // Worker-able English first: ge.movie, then UAFlix.
   if (tmdb) {
     const en = gemEnglishToStremio(await gemEnglish(tmdb, type, season, episode).catch(() => []));
     if (en.length) return en;
@@ -1151,14 +895,7 @@ async function resolveEnglishCascade(meta, type, season, episode) {
     const en = await uafixEnglish(name, year, type, season, episode).catch(() => []);
     if (en.length) return en;
   }
-
-  // Next: HDRezka's original track (origin-bound). For an English-origin title that
-  // IS the English audio; otherwise relabel it honestly as Original · <Language>.
-  const rez = name ? await rezkaEnglish(name, year, type, season, episode).catch(() => []) : [];
-  if (rez.length) return englishOrigin ? rez : relabelOriginal(rez, origLang);
-
-  // Final fallback: kkphim original audio (English, possibly with burned-in VN
-  // subs). Worker-able and TMDB-matched, but lowest priority due to the subtitles.
+  // Final fallback: kkphim original audio (English, possibly with burned-in VN subs).
   if (name && (tmdb || year)) {
     const kk = await kkphimEnglish(name, tmdb, year, type, season, episode).catch(() => []);
     if (kk.length) return kk;
@@ -1173,10 +910,10 @@ builder.defineStreamHandler(async ({ type, id }) => {
   try {
     if (type !== 'movie' && type !== 'series') return { streams: [] };
 
-    // One id → title/year/tmdb, then resolve all four language sources in parallel:
-    //   ka → ge.movie (tmdb) · ru → HDRezka · uk → UAFlix · en → cascade (HDRezka
-    //   original → ge.movie → UAFlix). Each row is lang-tagged; STREAMFULL's
-    //   per-language fallback chain plays it and advances to a torrent on failure.
+    // One id → title/year/tmdb, then resolve the language sources in parallel:
+    //   ka → ge.movie (tmdb) · uk → UAFlix · en → cascade (ge.movie → UAFlix →
+    //   kkphim). Every source streams through the Cloudflare Worker, so nothing
+    //   here touches the origin's bandwidth.
     const baseId = type === 'series' ? id.split(':')[0] : id;
     const season = type === 'series' ? parseInt(id.split(':')[1] || '1', 10) : 1;
     const episode = type === 'series' ? parseInt(id.split(':')[2] || '1', 10) : 1;
@@ -1184,18 +921,16 @@ builder.defineStreamHandler(async ({ type, id }) => {
     const meta = await metaForId(baseId, type);
     const { name, year, tmdb } = meta;
 
-    const [ka, ru, uk, en] = await Promise.all([
+    const [ka, uk, en] = await Promise.all([
       tmdb ? (type === 'series' ? gemEpisode(tmdb, season, episode) : gemMovie(tmdb)) : Promise.resolve([]),
-      name ? rezkaResolve(name, year, type, season, episode) : Promise.resolve([]),
       name ? uafixResolve(name, year, type, season, episode) : Promise.resolve([]),
       resolveEnglishCascade({ name, year, tmdb }, type, season, episode),
     ]);
 
     return {
       streams: [
-        ...en,                   // 🇬🇧 English (HDRezka original → ge.movie → UAFlix)
+        ...en,                   // 🇬🇧 English (ge.movie → UAFlix → kkphim)
         ...gemToStremio(ka),     // 🇬🇪 Georgian
-        ...rezkaToStremio(ru),   // 🇷🇺 Russian
         ...uafixToStremio(uk),   // 🇺🇦 Ukrainian
       ],
     };

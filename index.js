@@ -10,7 +10,7 @@ const path = require('path');
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '2.2.0',
+  version: '2.3.0',
   name: '🇬🇪 Georgian / Russian / Ukrainian Dubbed',
   description: 'Dubbed movies & series — 🇬🇪 Georgian (ge.movie) · 🇷🇺 Russian (HDRezka) · 🇺🇦 Ukrainian (UAFlix)',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
@@ -950,6 +950,90 @@ async function uafixEnglish(name, year, type, season, episode) {
 }
 
 // ─────────────────────────────────────────
+//  KKPHIM (phimapi.com) — LAST-RESORT English source. Vietnamese catalog, but its
+//  "Vietsub" server is the ORIGINAL audio (English for Hollywood titles) — sometimes
+//  with burned-in Vietnamese subtitles, so it's only used when no cleaner English
+//  exists (ge.movie/UAFlix/HDRezka all lacked it). Public JSON API: search → detail
+//  → direct .m3u8. The CDN is un-gated (no Referer, open CORS, NOT IP-locked), so it
+//  rides the Worker like ge.movie/UAFlix. Matched STRICTLY by TMDB id to avoid wrong
+//  titles (search payload carries tmdb.id, so one request resolves the slug).
+// ─────────────────────────────────────────
+const KKPHIM_API = 'https://phimapi.com';
+
+// "Vietsub" = original audio; skip "Thuyết Minh"/"Lồng Tiếng" (Vietnamese voiceover).
+function kkIsOriginalServer(name) {
+  const n = (name || '').toLowerCase();
+  if (/thuy[eế]t minh|l[oồ]ng ti[eế]ng/.test(n)) return false;
+  return /vietsub|english|eng|sub|original/.test(n);
+}
+
+// phimapi search is finicky with multi-word English titles, so try progressively
+// broader keywords (full cleaned title → first two words → first word).
+function kkKeywords(name) {
+  const clean = (name || '').toLowerCase().replace(/[^a-z0-9 ]+/g, ' ').replace(/\s+/g, ' ').trim();
+  if (!clean) return [];
+  const words = clean.split(' ');
+  const out = [clean];
+  if (words.length > 2) out.push(words.slice(0, 2).join(' '));
+  if (words.length > 1) out.push(words[0]);
+  return [...new Set(out)];
+}
+
+const kkNorm = s => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+
+// Find the kkphim detail doc for this title. Tier 1: exact TMDB id (search payload
+// carries tmdb.id). Tier 2 (for older entries whose tmdb is null): exact English
+// title + exact year — strict enough to avoid wrong-title/remake mismatches.
+async function kkFind(name, tmdbId, year) {
+  if (!name) return null;
+  const wantName = kkNorm(name);
+  for (const kw of kkKeywords(name)) {
+    let items;
+    try {
+      const j = await getJson(`${KKPHIM_API}/v1/api/tim-kiem?keyword=${encodeURIComponent(kw)}&limit=20`, 9000);
+      items = (j && j.data && j.data.items) || [];
+    } catch { continue; }
+    const hit = (tmdbId && items.find(it => it.tmdb && String(it.tmdb.id) === String(tmdbId)))
+      || (year && items.find(it => kkNorm(it.origin_name) === wantName && String(it.year) === String(year)));
+    if (hit) {
+      const d = await getJson(`${KKPHIM_API}/phim/${encodeURIComponent(hit.slug)}`, 9000).catch(() => null);
+      if (d && d.movie) return d;
+    }
+  }
+  return null;
+}
+
+// Resolve the kkphim original-audio (English) m3u8 for a movie or episode.
+async function kkphimEnglish(name, tmdbId, year, type, season, episode) {
+  try {
+    const d = await kkFind(name, tmdbId, year);
+    if (!d) return [];
+    const servers = d.episodes || [];
+    const orig = servers.find(s => kkIsOriginalServer(s.server_name)) || servers[0];
+    if (!orig || !Array.isArray(orig.server_data) || !orig.server_data.length) return [];
+
+    let entry;
+    if (type === 'series') {
+      entry = orig.server_data.find(e => {
+        const num = parseInt((String(e.name || e.slug || '').match(/\d+/) || ['0'])[0], 10);
+        return num === episode;
+      }) || (orig.server_data.length === 1 ? orig.server_data[0] : null);
+    } else {
+      entry = orig.server_data[0];
+    }
+    const m3u8 = entry && entry.link_m3u8;
+    if (!m3u8 || !/^https?:/.test(m3u8)) return [];
+
+    return [{
+      name: '🇬🇧 kkphim',
+      title: '🇬🇧 English · may have VN subs',
+      url: workerProxify(m3u8, '', true),   // un-gated CDN → no Referer; rides the Worker
+      behaviorHints: { notWebReady: true, proxyHeaders: { request: { 'User-Agent': UA } }, streamType: 'hls', lang: 'en', audioLang: 'en' },
+    }];
+  } catch { return []; }
+}
+
+// ─────────────────────────────────────────
 //  CATALOG HANDLER
 // ─────────────────────────────────────────
 builder.defineCatalogHandler(async ({ type, id, extra }) => {
@@ -1068,10 +1152,17 @@ async function resolveEnglishCascade(meta, type, season, episode) {
     if (en.length) return en;
   }
 
-  // Last resort: HDRezka's original track (origin-bound). For an English-origin
-  // title that IS the English audio; otherwise relabel it honestly as Original.
+  // Next: HDRezka's original track (origin-bound). For an English-origin title that
+  // IS the English audio; otherwise relabel it honestly as Original · <Language>.
   const rez = name ? await rezkaEnglish(name, year, type, season, episode).catch(() => []) : [];
   if (rez.length) return englishOrigin ? rez : relabelOriginal(rez, origLang);
+
+  // Final fallback: kkphim original audio (English, possibly with burned-in VN
+  // subs). Worker-able and TMDB-matched, but lowest priority due to the subtitles.
+  if (name && (tmdb || year)) {
+    const kk = await kkphimEnglish(name, tmdb, year, type, season, episode).catch(() => []);
+    if (kk.length) return kk;
+  }
   return [];
 }
 

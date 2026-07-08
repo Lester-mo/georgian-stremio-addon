@@ -1,6 +1,6 @@
 {
   "name": "georgian-stredio-addon",
-  "version": "3.2.4",
+  "version": "3.2.5",
   "description": "Stremio addon for Georgian dubbed movies and series from Adjaranet and GEMovie",
   "main": "index.js",
   "scripts": {

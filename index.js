@@ -8,7 +8,7 @@ const fetch = require('node-fetch');
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '3.2.4',
+  version: '3.2.5',
   name: 'Mercury',
   description: 'Dubbed movies & series — 🇬🇪 Georgian · 🇷🇺 Russian · 🇺🇦 Ukrainian · 🇬🇧 English',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
@@ -162,18 +162,16 @@ function proxify(url, referer, isHls, audio) {
   return `${base}/proxy?d=${encodeProxy(url, referer, isHls, audio)}`;
 }
 
-// Hosts the Cloudflare Worker cannot fetch reliably — these must ride the self
-// proxy (Render), whose IP they serve consistently:
-//  - em.filmx.my (HLS playlists): hard 403 to every Worker request.
-//  - *.videodb.online (HLS segments + subs, e.g. cdn1-/str1-): Cloudflare-proxied
-//    zones that erratically 403 Worker fetches per-URL (~20% of segments, stable
-//    per URL, unaffected by ref/cache-busters) — enough to kill any playback.
-// videodb.cloud (MP4 titles) is NOT Cloudflare-proxied and stays on the Worker.
+// Hosts the Cloudflare Worker cannot fetch — these ride the self proxy (Render):
+//  - em.filmx.my (HLS playlists): hard 403 to EVERY Worker request, so sending
+//    them to the Worker would just bounce each one through its Render fallback
+//    (double hop for zero savings — playlists are tiny text anyway).
+// *-videodb.online (HLS segments) erratically 403 Worker fetches (~20% of URLs),
+// but since the Worker gained a 403→Render-fallback rescue, they ride the Worker
+// again: ~80% of the video bytes stay on Cloudflare, only the blocked minority
+// flows through Render. videodb.cloud (MP4 titles) was never affected.
 function workerBlocked(url) {
-  try {
-    const h = new URL(url).hostname;
-    return h === 'em.filmx.my' || /(^|[.-])videodb\.online$/.test(h);
-  } catch { return false; }
+  try { return new URL(url).hostname === 'em.filmx.my'; } catch { return false; }
 }
 
 // Route a stream through the Cloudflare Worker relay (matches the Worker's

@@ -8,7 +8,7 @@ const fetch = require('node-fetch');
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '3.2.3',
+  version: '3.2.4',
   name: 'Mercury',
   description: 'Dubbed movies & series — 🇬🇪 Georgian · 🇷🇺 Russian · 🇺🇦 Ukrainian · 🇬🇧 English',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
@@ -162,12 +162,18 @@ function proxify(url, referer, isHls, audio) {
   return `${base}/proxy?d=${encodeProxy(url, referer, isHls, audio)}`;
 }
 
-// em.filmx.my returns 403 to Cloudflare Worker IPs (its HLS playlists live there),
-// while the actual segments sit on cdn*-videodb.online, which the Worker CAN reach.
-// So playlist urls on this host must ride the self proxy; the playlist rewriter
-// below then points the heavy segment urls back at the Worker.
+// Hosts the Cloudflare Worker cannot fetch reliably — these must ride the self
+// proxy (Render), whose IP they serve consistently:
+//  - em.filmx.my (HLS playlists): hard 403 to every Worker request.
+//  - *.videodb.online (HLS segments + subs, e.g. cdn1-/str1-): Cloudflare-proxied
+//    zones that erratically 403 Worker fetches per-URL (~20% of segments, stable
+//    per URL, unaffected by ref/cache-busters) — enough to kill any playback.
+// videodb.cloud (MP4 titles) is NOT Cloudflare-proxied and stays on the Worker.
 function workerBlocked(url) {
-  try { return new URL(url).hostname === 'em.filmx.my'; } catch { return false; }
+  try {
+    const h = new URL(url).hostname;
+    return h === 'em.filmx.my' || /(^|[.-])videodb\.online$/.test(h);
+  } catch { return false; }
 }
 
 // Route a stream through the Cloudflare Worker relay (matches the Worker's

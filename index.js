@@ -8,7 +8,7 @@ const fetch = require('node-fetch');
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '3.2.1',
+  version: '3.2.2',
   name: 'Mercury',
   description: 'Dubbed movies & series — 🇬🇪 Georgian · 🇷🇺 Russian · 🇺🇦 Ukrainian · 🇬🇧 English',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
@@ -526,8 +526,6 @@ function gemToStremio(resolved) {
   if (mp4.length) {
     const r = mp4[0];
     streams.push({
-      name: 'Mercury',
-      title: `🇬🇪 ქართული აუდიო${r.quality ? ' · ' + r.quality : ''}`,
       url: workerProxify(r.url, r.referer, false),
       subtitles: subsOf(r),
       behaviorHints: { notWebReady: false, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'mp4', lang: 'ka', audioLang: 'ka' },
@@ -535,8 +533,6 @@ function gemToStremio(resolved) {
   }
   for (const r of resolved.filter(r => r.kind === 'hls')) {
     streams.push({
-      name: 'Mercury',
-      title: '🇬🇪 ქართული აუდიო',
       url: workerProxify(r.url, r.referer, true),
       subtitles: subsOf(r),
       behaviorHints: { notWebReady: true, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'hls', lang: 'ka', audioLang: 'ka' },
@@ -556,8 +552,6 @@ function gemEnglishToStremio(resolved) {
   if (mp4.length) {
     const r = mp4[0];
     streams.push({
-      name: 'Mercury',
-      title: `🇬🇧 English${r.quality ? ' · ' + r.quality : ''}`,
       url: workerProxify(r.url, r.referer, false),
       subtitles: subsOf(r),
       behaviorHints: { notWebReady: false, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'mp4', lang: 'en', audioLang: 'en' },
@@ -565,8 +559,6 @@ function gemEnglishToStremio(resolved) {
   }
   for (const r of resolved.filter(r => r.kind === 'hls')) {
     streams.push({
-      name: 'Mercury',
-      title: '🇬🇧 English',
       url: workerProxify(r.url, r.referer, true),
       subtitles: subsOf(r),
       behaviorHints: { notWebReady: true, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'hls', lang: 'en', audioLang: 'en' },
@@ -586,8 +578,6 @@ function gemRussianToStremio(resolved) {
   if (mp4.length) {
     const r = mp4[0];
     streams.push({
-      name: 'Mercury',
-      title: `🇷🇺 Русский${r.quality ? ' · ' + r.quality : ''}`,
       url: workerProxify(r.url, r.referer, false),
       subtitles: subsOf(r),
       behaviorHints: { notWebReady: false, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'mp4', lang: 'ru', audioLang: 'ru' },
@@ -595,8 +585,6 @@ function gemRussianToStremio(resolved) {
   }
   for (const r of resolved.filter(r => r.kind === 'hls')) {
     streams.push({
-      name: 'Mercury',
-      title: '🇷🇺 Русский',
       url: workerProxify(r.url, r.referer, true),
       subtitles: subsOf(r),
       behaviorHints: { notWebReady: true, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'hls', lang: 'ru', audioLang: 'ru' },
@@ -699,8 +687,6 @@ async function uafixResolve(name, year, type, season, episode) {
 function uafixToStremio(streams) {
   if (!streams.length) return [];
   return [{
-    name: 'Mercury',
-    title: '🇺🇦 Українською',
     url: workerProxify(streams[0].url, ZET_REF, true),
     behaviorHints: { notWebReady: true, proxyHeaders: { request: { Referer: ZET_REF, 'User-Agent': UA } }, streamType: 'hls', lang: 'uk', audioLang: 'uk' },
   }];
@@ -725,8 +711,6 @@ async function uafixEnglish(name, year, type, season, episode) {
       (/LANGUAGE="(en|eng)"/i.test(l) || /NAME="[^"]*\b(eng|english)\b/i.test(l)));
     if (!hasEn) return [];
     return [{
-      name: 'Mercury',
-      title: '🇬🇧 English',
       url: workerProxify(file, ZET_REF, true),
       behaviorHints: { notWebReady: true, proxyHeaders: { request: { Referer: ZET_REF, 'User-Agent': UA } }, streamType: 'hls', lang: 'en', audioLang: 'en' },
     }];
@@ -823,8 +807,6 @@ async function kkphimEnglish(name, tmdbId, year, type, season, episode) {
     if (!m3u8 || !/^https?:/.test(m3u8)) return [];
 
     return [{
-      name: 'Mercury',
-      title: '🇬🇧 English · may have VN subs',
       url: workerProxify(m3u8, '', true),   // un-gated CDN → no Referer; rides the Worker
       behaviorHints: { notWebReady: true, proxyHeaders: { request: { 'User-Agent': UA } }, streamType: 'hls', lang: 'en', audioLang: 'en' },
     }];

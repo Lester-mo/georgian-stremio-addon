@@ -8,7 +8,7 @@ const fetch = require('node-fetch');
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '3.1.0',
+  version: '3.1.1',
   name: '🇬🇪 Georgian / Russian / Ukrainian / English Dubbed',
   description: 'Dubbed movies & series — 🇬🇪 Georgian · 🇷🇺 Russian · 🇺🇦 Ukrainian · 🇬🇧 English (ge.movie · UAFlix · kkphim)',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
@@ -181,8 +181,10 @@ function reqBaseUrl(req) {
 }
 
 // Compact, URL-safe token carrying the target url + the Referer to send upstream.
-function encodeProxy(targetUrl, referer) {
-  return Buffer.from(JSON.stringify({ u: targetUrl, r: referer || '' }), 'utf8')
+// h:1 marks the target as an HLS playlist — em.filmx.my serves playlists as
+// text/plain from .txt//m3/ paths, so neither extension nor content-type reveals it.
+function encodeProxy(targetUrl, referer, isHls) {
+  return Buffer.from(JSON.stringify({ u: targetUrl, r: referer || '', ...(isHls ? { h: 1 } : {}) }), 'utf8')
     .toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 function decodeProxy(token) {
@@ -193,21 +195,30 @@ function decodeProxy(token) {
 // Rewrite a CDN url → this addon's /proxy. Uses the request-scoped base url
 // (AsyncLocalStorage survives awaits, so handlers/builders just call this). With
 // no base known, returns the url untouched (native app + proxyHeaders path).
-function proxify(url, referer) {
+function proxify(url, referer, isHls) {
   if (!url) return url;
   const store = als.getStore();
   const base = store && store.baseUrl;
   if (!base) return url;
-  return `${base}/proxy?d=${encodeProxy(url, referer)}`;
+  return `${base}/proxy?d=${encodeProxy(url, referer, isHls)}`;
+}
+
+// em.filmx.my returns 403 to Cloudflare Worker IPs (its HLS playlists live there),
+// while the actual segments sit on cdn*-videodb.online, which the Worker CAN reach.
+// So playlist urls on this host must ride the self proxy; the playlist rewriter
+// below then points the heavy segment urls back at the Worker.
+function workerBlocked(url) {
+  try { return new URL(url).hostname === 'em.filmx.my'; } catch { return false; }
 }
 
 // Route a stream through the Cloudflare Worker relay (matches the Worker's
 // /stream-proxy?src=&ref=&t=hls contract) so its bytes don't count against this
 // host's bandwidth. Only for sources confirmed NOT IP-locked (ge.movie, UAFlix).
-// Falls back to the self proxy when no Worker is configured.
+// Falls back to the self proxy when no Worker is configured or the host 403s
+// Worker IPs (em.filmx.my — playlists only; segments still ride the Worker).
 function workerProxify(url, referer, isHls) {
   if (!url) return url;
-  if (!WORKER_PROXY) return proxify(url, referer);
+  if (!WORKER_PROXY || workerBlocked(url)) return proxify(url, referer, isHls);
   return `${WORKER_PROXY}/stream-proxy?src=${encodeURIComponent(url)}` +
     `&ref=${encodeURIComponent(referer || '')}${isHls ? '&t=hls' : ''}`;
 }
@@ -216,19 +227,27 @@ const HLS_RE = /\.m3u8(\?|$)/i;
 
 // Rewrite an HLS playlist so every variant/segment/key/map URI is itself proxied
 // (carrying the same Referer). Relative URIs are resolved against the playlist's
-// own URL first. Sub-playlists fetched through /proxy get rewritten recursively.
+// own URL first. Sub-playlists stay on the self proxy (tiny text, and em.filmx.my
+// 403s the Worker) and get rewritten recursively; segments/keys go to the Worker
+// when one is configured and the host allows it — that's where the real bytes are.
 function rewritePlaylist(text, playlistUrl, referer, base) {
+  // A master playlist's bare-line URIs are variant playlists; a media playlist's
+  // are segments. EXT-X-MEDIA/I-FRAME URIs are playlists; EXT-X-KEY/MAP are data.
+  const isMaster = /#EXT-X-STREAM-INF/.test(text);
+  const route = (u, asPlaylist) => {
+    const abs = new URL(u, playlistUrl).toString();
+    if (asPlaylist || !WORKER_PROXY || workerBlocked(abs))
+      return `${base}/proxy?d=${encodeProxy(abs, referer, asPlaylist)}`;
+    return `${WORKER_PROXY}/stream-proxy?src=${encodeURIComponent(abs)}&ref=${encodeURIComponent(referer || '')}`;
+  };
   return text.split(/\r?\n/).map(line => {
     const t = line.trim();
     if (!t) return line;
     if (t.startsWith('#')) {
-      return line.replace(/URI="([^"]+)"/g, (_m, u) => {
-        const abs = new URL(u, playlistUrl).toString();
-        return `URI="${base}/proxy?d=${encodeProxy(abs, referer)}"`;
-      });
+      const uriIsPlaylist = /^#EXT-X-(MEDIA|I-FRAME-STREAM-INF)/.test(t);
+      return line.replace(/URI="([^"]+)"/g, (_m, u) => `URI="${route(u, uriIsPlaylist)}"`);
     }
-    const abs = new URL(t, playlistUrl).toString();
-    return `${base}/proxy?d=${encodeProxy(abs, referer)}`;
+    return route(t, isMaster);
   }).join('\n');
 }
 
@@ -237,8 +256,8 @@ function rewritePlaylist(text, playlistUrl, referer, base) {
 // bytes straight through. No fetch timeout here — media bodies stream for minutes.
 async function handleProxy(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  let target, referer;
-  try { ({ u: target, r: referer } = decodeProxy(req.query.d)); }
+  let target, referer, isHls;
+  try { ({ u: target, r: referer, h: isHls } = decodeProxy(req.query.d)); }
   catch { res.status(400).end('bad proxy token'); return; }
   if (!/^https?:\/\//.test(target || '')) { res.status(400).end('bad url'); return; }
 
@@ -251,7 +270,7 @@ async function handleProxy(req, res) {
   catch { res.status(502).end('upstream fetch failed'); return; }
 
   const ct = up.headers.get('content-type') || '';
-  if (HLS_RE.test(String(target).split('?')[0]) || /mpegurl/i.test(ct)) {
+  if (isHls || HLS_RE.test(String(target).split('?')[0]) || /mpegurl/i.test(ct)) {
     const body = await up.text();
     res.status(up.status);
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');

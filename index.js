@@ -8,7 +8,7 @@ const fetch = require('node-fetch');
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '3.2.2',
+  version: '3.2.3',
   name: 'Mercury',
   description: 'Dubbed movies & series — 🇬🇪 Georgian · 🇷🇺 Russian · 🇺🇦 Ukrainian · 🇬🇧 English',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
@@ -139,8 +139,11 @@ function reqBaseUrl(req) {
 // Compact, URL-safe token carrying the target url + the Referer to send upstream.
 // h:1 marks the target as an HLS playlist — em.filmx.my serves playlists as
 // text/plain from .txt//m3/ paths, so neither extension nor content-type reveals it.
-function encodeProxy(targetUrl, referer, isHls) {
-  return Buffer.from(JSON.stringify({ u: targetUrl, r: referer || '', ...(isHls ? { h: 1 } : {}) }), 'utf8')
+// a:'ka'|'en'|'ru' pins the audio language: the rewriter keeps ONLY that rendition
+// in a multi-audio master (players ignore behaviorHints.audioLang and would
+// otherwise always play the master's DEFAULT track).
+function encodeProxy(targetUrl, referer, isHls, audio) {
+  return Buffer.from(JSON.stringify({ u: targetUrl, r: referer || '', ...(isHls ? { h: 1 } : {}), ...(audio ? { a: audio } : {}) }), 'utf8')
     .toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 function decodeProxy(token) {
@@ -151,12 +154,12 @@ function decodeProxy(token) {
 // Rewrite a CDN url → this addon's /proxy. Uses the request-scoped base url
 // (AsyncLocalStorage survives awaits, so handlers/builders just call this). With
 // no base known, returns the url untouched (native app + proxyHeaders path).
-function proxify(url, referer, isHls) {
+function proxify(url, referer, isHls, audio) {
   if (!url) return url;
   const store = als.getStore();
   const base = store && store.baseUrl;
   if (!base) return url;
-  return `${base}/proxy?d=${encodeProxy(url, referer, isHls)}`;
+  return `${base}/proxy?d=${encodeProxy(url, referer, isHls, audio)}`;
 }
 
 // em.filmx.my returns 403 to Cloudflare Worker IPs (its HLS playlists live there),
@@ -172,9 +175,9 @@ function workerBlocked(url) {
 // host's bandwidth. Only for sources confirmed NOT IP-locked (ge.movie, UAFlix).
 // Falls back to the self proxy when no Worker is configured or the host 403s
 // Worker IPs (em.filmx.my — playlists only; segments still ride the Worker).
-function workerProxify(url, referer, isHls) {
+function workerProxify(url, referer, isHls, audio) {
   if (!url) return url;
-  if (!WORKER_PROXY || workerBlocked(url)) return proxify(url, referer, isHls);
+  if (!WORKER_PROXY || workerBlocked(url)) return proxify(url, referer, isHls, audio);
   return `${WORKER_PROXY}/stream-proxy?src=${encodeURIComponent(url)}` +
     `&ref=${encodeURIComponent(referer || '')}${isHls ? '&t=hls' : ''}`;
 }
@@ -186,7 +189,7 @@ const HLS_RE = /\.m3u8(\?|$)/i;
 // own URL first. Sub-playlists stay on the self proxy (tiny text, and em.filmx.my
 // 403s the Worker) and get rewritten recursively; segments/keys go to the Worker
 // when one is configured and the host allows it — that's where the real bytes are.
-function rewritePlaylist(text, playlistUrl, referer, base) {
+function rewritePlaylist(text, playlistUrl, referer, base, audio) {
   // A master playlist's bare-line URIs are variant playlists; a media playlist's
   // are segments. EXT-X-MEDIA/I-FRAME URIs are playlists; EXT-X-KEY/MAP are data.
   const isMaster = /#EXT-X-STREAM-INF/.test(text);
@@ -196,15 +199,27 @@ function rewritePlaylist(text, playlistUrl, referer, base) {
       return `${base}/proxy?d=${encodeProxy(abs, referer, asPlaylist)}`;
     return `${WORKER_PROXY}/stream-proxy?src=${encodeURIComponent(abs)}&ref=${encodeURIComponent(referer || '')}`;
   };
+  // Audio pinning: keep only the requested language's TYPE=AUDIO rendition and
+  // force it DEFAULT — players play the master's DEFAULT track regardless of
+  // which language row was clicked. Skipped unless the master actually carries
+  // a matching rendition (never return a playlist with zero audio).
+  const isAudioLine = t => /^#EXT-X-MEDIA/.test(t) && /TYPE=AUDIO/i.test(t);
+  const lineLang = t => langInfo(((t.match(/NAME="([^"]*)"/) || [])[1] || '') + ' ' + ((t.match(/LANGUAGE="([^"]*)"/) || [])[1] || '')).code;
+  const pinAudio = audio && isMaster &&
+    text.split(/\r?\n/).some(l => isAudioLine(l.trim()) && lineLang(l.trim()) === audio);
   return text.split(/\r?\n/).map(line => {
     const t = line.trim();
     if (!t) return line;
     if (t.startsWith('#')) {
+      if (pinAudio && isAudioLine(t)) {
+        if (lineLang(t) !== audio) return null;
+        line = line.replace(/DEFAULT=(YES|NO)/i, 'DEFAULT=YES').replace(/AUTOSELECT=(YES|NO)/i, 'AUTOSELECT=YES');
+      }
       const uriIsPlaylist = /^#EXT-X-(MEDIA|I-FRAME-STREAM-INF)/.test(t);
       return line.replace(/URI="([^"]+)"/g, (_m, u) => `URI="${route(u, uriIsPlaylist)}"`);
     }
     return route(t, isMaster);
-  }).join('\n');
+  }).filter(l => l !== null).join('\n');
 }
 
 // The /proxy request handler: fetch the target with the right Referer (+ forward
@@ -212,8 +227,8 @@ function rewritePlaylist(text, playlistUrl, referer, base) {
 // bytes straight through. No fetch timeout here — media bodies stream for minutes.
 async function handleProxy(req, res) {
   res.setHeader('Access-Control-Allow-Origin', '*');
-  let target, referer, isHls;
-  try { ({ u: target, r: referer, h: isHls } = decodeProxy(req.query.d)); }
+  let target, referer, isHls, audio;
+  try { ({ u: target, r: referer, h: isHls, a: audio } = decodeProxy(req.query.d)); }
   catch { res.status(400).end('bad proxy token'); return; }
   if (!/^https?:\/\//.test(target || '')) { res.status(400).end('bad url'); return; }
 
@@ -230,7 +245,7 @@ async function handleProxy(req, res) {
     const body = await up.text();
     res.status(up.status);
     res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-    res.end(rewritePlaylist(body, target, referer, reqBaseUrl(req)));
+    res.end(rewritePlaylist(body, target, referer, reqBaseUrl(req), audio));
     return;
   }
 
@@ -533,7 +548,7 @@ function gemToStremio(resolved) {
   }
   for (const r of resolved.filter(r => r.kind === 'hls')) {
     streams.push({
-      url: workerProxify(r.url, r.referer, true),
+      url: workerProxify(r.url, r.referer, true, 'ka'),
       subtitles: subsOf(r),
       behaviorHints: { notWebReady: true, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'hls', lang: 'ka', audioLang: 'ka' },
     });
@@ -559,7 +574,7 @@ function gemEnglishToStremio(resolved) {
   }
   for (const r of resolved.filter(r => r.kind === 'hls')) {
     streams.push({
-      url: workerProxify(r.url, r.referer, true),
+      url: workerProxify(r.url, r.referer, true, 'en'),
       subtitles: subsOf(r),
       behaviorHints: { notWebReady: true, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'hls', lang: 'en', audioLang: 'en' },
     });
@@ -585,7 +600,7 @@ function gemRussianToStremio(resolved) {
   }
   for (const r of resolved.filter(r => r.kind === 'hls')) {
     streams.push({
-      url: workerProxify(r.url, r.referer, true),
+      url: workerProxify(r.url, r.referer, true, 'ru'),
       subtitles: subsOf(r),
       behaviorHints: { notWebReady: true, proxyHeaders: { request: { Referer: r.referer, 'User-Agent': UA } }, streamType: 'hls', lang: 'ru', audioLang: 'ru' },
     });

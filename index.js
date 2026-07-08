@@ -8,35 +8,15 @@ const fetch = require('node-fetch');
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '3.1.1',
+  version: '3.2.0',
   name: '🇬🇪 Georgian / Russian / Ukrainian / English Dubbed',
   description: 'Dubbed movies & series — 🇬🇪 Georgian · 🇷🇺 Russian · 🇺🇦 Ukrainian · 🇬🇧 English (ge.movie · UAFlix · kkphim)',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
-  resources: ['stream', 'catalog', 'meta'],
+  // Stream-only addon: no catalogs (no home rows) — meta stays for adj_ ids.
+  resources: ['stream', 'meta'],
   types: ['movie', 'series'],
   idPrefixes: ['tt', 'adj_'],
-  catalogs: [
-    {
-      type: 'movie',
-      id: 'georgian_movies',
-      name: '🇬🇪 Georgian Dubbed Movies',
-      extra: [
-        { name: 'search', isRequired: false },
-        { name: 'genre', isRequired: false, options: ['Action', 'Comedy', 'Drama', 'Horror', 'Animation', 'Family', 'Thriller', 'Romance', 'Crime', 'Adventure', 'Fantasy', 'Documentary'] },
-        { name: 'skip', isRequired: false }
-      ]
-    },
-    {
-      type: 'series',
-      id: 'georgian_series',
-      name: '🇬🇪 Georgian Dubbed Series',
-      extra: [
-        { name: 'search', isRequired: false },
-        { name: 'genre', isRequired: false, options: ['Action', 'Comedy', 'Drama', 'Horror', 'Animation', 'Family', 'Thriller', 'Romance', 'Crime', 'Adventure', 'Fantasy', 'Documentary'] },
-        { name: 'skip', isRequired: false }
-      ]
-    }
-  ],
+  catalogs: [],
   behaviorHints: { adult: false, p2p: false }
 };
 
@@ -65,7 +45,6 @@ const HEADERS = {
   'Accept': 'application/json'
 };
 
-const PAGE_SIZE = 24;
 const BASE_TTL = 5 * 60 * 1000;       // re-validate the active base every 5 min
 let activeBase = null;
 let activeBaseAt = 0;
@@ -117,32 +96,9 @@ async function api(path, timeout) {
 // ─────────────────────────────────────────
 //  MAPPING HELPERS
 // ─────────────────────────────────────────
-// Stremio genre (English) → Adjaranet genre slug
-const GENRE_MAP = {
-  Action: 'boeviki', Comedy: 'komedia', Drama: 'drama', Horror: 'sashineleba',
-  Animation: 'animaciuri', Family: 'saojaxo', Thriller: 'trileri', Romance: 'melodrama',
-  Crime: 'kriminaluri', Adventure: 'satavgadasavlo', Fantasy: 'fantastika', Documentary: 'dokumenturi'
-};
-
 function absUrl(base, path) {
   if (!path) return null;
   return /^https?:\/\//.test(path) ? path : base + path;
-}
-
-// Adjaranet catalog/search item → Stremio meta-preview
-function itemToMeta(item, base) {
-  return {
-    id: `adj_${item.slug}`,
-    type: item.type === 'series' ? 'series' : 'movie',
-    name: item.title_en || item.title_ka || item.title || 'Unknown',
-    poster: absUrl(base, item.poster),
-    posterShape: 'poster',
-    background: absUrl(base, item.cover || item.poster),
-    description: item.description || '',
-    releaseInfo: item.year ? String(item.year) : undefined,
-    imdbRating: item.imdb_rating ? String(item.imdb_rating) : undefined,
-    genres: Array.isArray(item.genres) ? item.genres.map(g => g.name) : []
-  };
 }
 
 const UA = HEADERS['User-Agent'];
@@ -874,37 +830,6 @@ async function kkphimEnglish(name, tmdbId, year, type, season, episode) {
     }];
   } catch { return []; }
 }
-
-// ─────────────────────────────────────────
-//  CATALOG HANDLER
-// ─────────────────────────────────────────
-builder.defineCatalogHandler(async ({ type, id, extra }) => {
-  const base = await getBase();
-  const wantType = type === 'series' ? 'series' : 'movie';
-  const skip = parseInt(extra && extra.skip ? extra.skip : 0, 10) || 0;
-  const page = Math.floor(skip / PAGE_SIZE) + 1;
-
-  try {
-    let items = [];
-
-    if (extra && extra.search) {
-      const j = await api(`/api/v1/search?q=${encodeURIComponent(extra.search)}`, 9000);
-      items = ((j && j.data) || []).filter(it => it.type === wantType);
-    } else if (extra && extra.genre && GENRE_MAP[extra.genre]) {
-      const j = await api(`/api/v1/genres/${GENRE_MAP[extra.genre]}?page=${page}&per_page=${PAGE_SIZE}`, 9000);
-      const data = (j && j.movies && j.movies.data) || [];
-      items = data.filter(it => it.type === wantType);
-    } else {
-      const j = await api(`/api/v1/movies?type=${wantType}&page=${page}&per_page=${PAGE_SIZE}`, 9000);
-      items = (j && j.data) || [];
-    }
-
-    return { metas: items.map(it => itemToMeta(it, base)) };
-  } catch (e) {
-    console.error('catalog error:', e.message);
-    return { metas: [] };
-  }
-});
 
 // ─────────────────────────────────────────
 //  META HANDLER

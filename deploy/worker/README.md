@@ -18,9 +18,9 @@ key   = sha256(PROXY_SECRET)
 So the upstream host and Referer are no longer visible in the URL. The Worker
 seals its own child-playlist URLs and the origin-fallback hop the same way.
 
-The legacy plaintext form `?src=<url>&ref=<ref>[&t=hls]` is still accepted for a
-smooth cutover; the addon no longer emits it. Drop that branch once you're
-confident nothing stale references it.
+A `?d=` token is the ONLY accepted form — any request without a valid one is
+rejected (`400 bad request`), so the Worker can't be used as an open plaintext
+relay. (The legacy `?src=` form was dropped after cutover.)
 
 ## Deploy
 

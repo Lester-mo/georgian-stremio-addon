@@ -1,8 +1,10 @@
 // stream-proxy relay with origin fallback + sealed tokens
-// Contract: GET /stream-proxy?d=<sealed token>
+// Contract: GET /stream-proxy?d=<sealed token>   (the ONLY accepted form)
 //   token = base64url( iv[12] ‖ authTag[16] ‖ AES-256-GCM(JSON) )
 //   JSON  = { u: <url>, r: <referer>, h?: 1 }   (h marks an HLS playlist)
-// Legacy (accepted during cutover, no longer emitted): ?src=<url>&ref=<ref>[&t=hls]
+// A request without a valid ?d= is rejected — the legacy plaintext ?src= form is
+// no longer accepted, so the Worker can't be used as an open relay and never
+// exposes an upstream host in its URL.
 //
 // The key is sha256(PROXY_SECRET) — the SAME secret + derivation the addon uses
 // (/etc/mercury.secret on the Oracle box), so ?d= tokens never expose the
@@ -29,20 +31,14 @@ export default {
     try { key = await getKey(env); }
     catch { return new Response('server misconfigured (no PROXY_SECRET)', { status: 500, headers: cors() }); }
 
-    // Sealed token (?d=) is the norm; legacy ?src= is still accepted so the
-    // cutover survives an addon/Worker deploy-order mismatch.
-    let src, ref, isHls;
+    // Sealed token (?d=) is the ONLY accepted form.
     const token = url.searchParams.get('d');
-    if (token) {
-      let p;
-      try { p = await open(key, token); }
-      catch { return new Response('bad token', { status: 400, headers: cors() }); }
+    if (!token) return new Response('bad request', { status: 400, headers: cors() });
+    let src, ref, isHls;
+    try {
+      const p = await open(key, token);
       src = p.u; ref = p.r || ''; isHls = !!p.h;
-    } else {
-      src = url.searchParams.get('src');
-      ref = url.searchParams.get('ref') || '';
-      isHls = url.searchParams.get('t') === 'hls';
-    }
+    } catch { return new Response('bad token', { status: 400, headers: cors() }); }
     if (!src || !/^https?:\/\//.test(src)) return new Response('bad src', { status: 400, headers: cors() });
 
     const headers = { 'User-Agent': UA, 'Accept': '*/*' };

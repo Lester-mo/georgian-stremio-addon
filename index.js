@@ -789,7 +789,33 @@ function rezkaParseStreams(decoded) {
 // (typical for Soviet classics), and rezka is only a fallback source: serving the
 // wrong movie is far worse than serving nothing. Year breaks ties among matches.
 const rzNorm = s => (s || '').toLowerCase().replace(/[^a-z0-9а-яё]+/gi, ' ').replace(/\s+/g, ' ').trim();
-async function rezkaSearch(name, year, wantSeries) {
+
+// Wikidata (keyless) → a film/series' Russian title by IMDb id. HDRezka indexes
+// Russian & Soviet cinema under Cyrillic titles that its search won't surface from
+// the English name (e.g. "Moscow Does Not Believe in Tears" ⇢ «Москва слезам не
+// верит»), so this recovers those as a search fallback. Cached per imdb id.
+const _ruTitleCache = new Map();
+async function wikidataRuTitle(imdbId) {
+  if (!imdbId || !/^tt\d+$/.test(imdbId)) return null;
+  if (_ruTitleCache.has(imdbId)) return _ruTitleCache.get(imdbId);
+  try {
+    const q = `SELECT ?ru WHERE { ?f wdt:P345 "${imdbId}". ?f rdfs:label ?ru. FILTER(LANG(?ru)="ru") } LIMIT 1`;
+    const res = await fetch(`https://query.wikidata.org/sparql?format=json&query=${encodeURIComponent(q)}`,
+      { headers: { 'User-Agent': 'MercuryStremioAddon/1.0', Accept: 'application/sparql-results+json, application/json' }, timeout: 9000 });
+    if (!res.ok) { _ruTitleCache.set(imdbId, null); return null; }
+    const j = await res.json();
+    const raw = j?.results?.bindings?.[0]?.ru?.value || null;
+    const title = raw ? raw.replace(/_/g, ' ').replace(/\s+/g, ' ').trim() : null;
+    _ruTitleCache.set(imdbId, title);
+    return title;
+  } catch { return null; }
+}
+
+// One HDRezka title search → best strict-matched page URL (or null). STRICT: the
+// result card must contain the searched title (normalized) — HDRezka's search is
+// fuzzy and returns unrelated films for titles it doesn't index under this name,
+// and rezka is only a fallback: serving the wrong movie is worse than nothing.
+async function rezkaSearchOne(name, year, wantSeries) {
   if (!name) return null;
   try {
     const res = await rezkaFetch(`${REZKA}/engine/ajax/search.php`, {
@@ -812,25 +838,41 @@ async function rezkaSearch(name, year, wantSeries) {
   } catch { return null; }
 }
 
+// English title first (cheap, no extra call); if HDRezka doesn't index it under
+// that name, retry with the Russian/original title from Wikidata. imdbId is
+// optional — without it (adj_ ids) only the English search runs.
+async function rezkaSearch(name, year, wantSeries, imdbId) {
+  const primary = await rezkaSearchOne(name, year, wantSeries);
+  if (primary) return primary;
+  const ruTitle = await wikidataRuTitle(imdbId);
+  if (ruTitle && rzNorm(ruTitle) !== rzNorm(name)) return rezkaSearchOne(ruTitle, year, wantSeries);
+  return null;
+}
+
 // Film/series page → { postId, translatorId (default Russian dub), isSeries }.
 async function rezkaPageInfo(pageUrl) {
   try {
     const res = await rezkaFetch(pageUrl, { headers: { Accept: 'text/html', Referer: REZKA_REF }, timeout: 12000 });
     if (!res.ok) return null;
     const html = res.body;
-    const postId = (html.match(/initCDN(?:Movies|Series)Events\((\d+)/) || html.match(/postId\s*[:=]\s*(\d+)/) || html.match(/data-post_id="(\d+)"/) || [])[1] || null;
-    const active = html.match(/b-translator__item[^>]*\bactive\b[^>]*data-translator_id="(\d+)"/i)
-      || html.match(/data-translator_id="(\d+)"/);
-    const translatorId = (active && active[1]) || '0';
+    // initCDN{Movies,Series}Events(postId, translatorId, …) carries BOTH ids —
+    // critical for single-dub films that render no translator menu (a bare
+    // data-translator_id fallback / '0' there yields a "session expired" error).
+    const cdn = html.match(/initCDN(?:Movies|Series)Events\((\d+)\s*,\s*(\d+)/);
+    const postId = (cdn && cdn[1]) || (html.match(/postId\s*[:=]\s*(\d+)/) || html.match(/data-post_id="(\d+)"/) || [])[1] || null;
+    // Prefer the active menu item (the user-visible default dub) when present,
+    // else the translator baked into the initCDN call.
+    const active = html.match(/b-translator__item[^>]*\bactive\b[^>]*data-translator_id="(\d+)"/i);
+    const translatorId = (active && active[1]) || (cdn && cdn[2]) || '0';
     const isSeries = /initCDNSeriesEvents/.test(html) || /\/(series|animation)\//i.test(pageUrl);
     return postId ? { postId, translatorId, isSeries } : null;
   } catch { return null; }
 }
 
 // Resolve Russian-dub streams for a movie or a specific episode.
-async function rezkaResolve(name, year, type, season, episode) {
+async function rezkaResolve(name, year, type, season, episode, imdbId) {
   try {
-    const pageUrl = await rezkaSearch(name, year, type === 'series');
+    const pageUrl = await rezkaSearch(name, year, type === 'series', imdbId);
     if (!pageUrl) return [];
     const info = await rezkaPageInfo(pageUrl);
     if (!info || !info.postId) return [];
@@ -880,9 +922,9 @@ async function rezkaEnglishInfo(pageUrl) {
 
 // Resolve HDRezka's original (English) audio for a movie/episode → a 🇬🇧 row.
 // Prefers a free numeric quality (360p–1080p) over premium-gated 1080p Ultra/2K/4K.
-async function rezkaEnglish(name, year, type, season, episode) {
+async function rezkaEnglish(name, year, type, season, episode, imdbId) {
   try {
-    const pageUrl = await rezkaSearch(name, year, type === 'series');
+    const pageUrl = await rezkaSearch(name, year, type === 'series', imdbId);
     if (!pageUrl) return [];
     const info = await rezkaEnglishInfo(pageUrl);
     if (!info || !info.postId) return [];
@@ -1199,7 +1241,7 @@ function relabelOriginal(rows, code) {
 // The origin is an Oracle free VM (10 TB/mo), so HDRezka bytes are affordable
 // again — but the Worker-first order still keeps most traffic on Cloudflare.
 async function resolveEnglishCascade(meta, type, season, episode) {
-  const { name, year, tmdb } = meta;
+  const { name, year, tmdb, imdbId } = meta;
   const origLang = await tmdbOriginalLang(tmdb, type);   // 'en' | 'ko' | … | null
   const englishOrigin = !origLang || origLang === 'en';  // null (unknown) → treat as English
 
@@ -1211,7 +1253,7 @@ async function resolveEnglishCascade(meta, type, season, episode) {
 
   // Next: HDRezka's original track (origin-bound self proxy). For an English-origin
   // title that IS the English audio; otherwise correct the audioLang hint.
-  const rez = name ? await rezkaEnglish(name, year, type, season, episode).catch(() => []) : [];
+  const rez = name ? await rezkaEnglish(name, year, type, season, episode, imdbId).catch(() => []) : [];
   if (rez.length) return englishOrigin ? rez : relabelOriginal(rez, origLang);
 
   // Final fallback: kkphim original audio (English, possibly with burned-in VN
@@ -1247,11 +1289,11 @@ builder.defineStreamHandler(async ({ type, id }) => {
       (async () => {
         const gem = tmdb ? await gemRussian(tmdb, type, season, episode).catch(() => []) : [];
         if (gem.length) return gemRussianToStremio(gem);
-        const rez = name ? await rezkaResolve(name, year, type, season, episode).catch(() => []) : [];
+        const rez = name ? await rezkaResolve(name, year, type, season, episode, baseId).catch(() => []) : [];
         return rezkaToStremio(rez);
       })(),
       name ? uafixResolve(name, year, type, season, episode) : Promise.resolve([]),
-      resolveEnglishCascade({ name, year, tmdb }, type, season, episode),
+      resolveEnglishCascade({ name, year, tmdb, imdbId: baseId }, type, season, episode),
     ]);
 
     return {

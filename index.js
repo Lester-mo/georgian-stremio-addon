@@ -11,7 +11,7 @@ const path = require('path');
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '3.4.2',
+  version: '3.5.0',
   name: 'Mercury',
   description: 'Dubbed movies & series — 🇬🇪 Georgian · 🇷🇺 Russian · 🇺🇦 Ukrainian · 🇬🇧 English',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
@@ -150,19 +150,34 @@ function reqBaseUrl(req) {
   return `${proto}://${host}`;
 }
 
-// Compact, URL-safe token carrying the target url + the Referer to send upstream.
+// Sealed, URL-safe token carrying the target url + the Referer to send upstream.
 // h:1 marks the target as an HLS playlist — em.filmx.my serves playlists as
 // text/plain from .txt//m3/ paths, so neither extension nor content-type reveals it.
 // a:'ka'|'en'|'ru' pins the audio language: the rewriter keeps ONLY that rendition
 // in a multi-audio master (players ignore behaviorHints.audioLang and would
 // otherwise always play the master's DEFAULT track).
+//
+// The payload is AES-256-GCM encrypted with a key that never leaves this server,
+// so ?d=… reveals neither the upstream host nor the Referer we forward — a scraper
+// can replay a token but can't read the source out of it (base64 was trivially
+// decodable). Key comes from PROXY_SECRET when set (stable across restarts, so
+// in-flight playlists survive a redeploy), else a random per-process key. Wire
+// format: base64url(iv[12] ‖ authTag[16] ‖ ciphertext).
+const PROXY_KEY = crypto.createHash('sha256')
+  .update(process.env.PROXY_SECRET || crypto.randomBytes(32)).digest();
 function encodeProxy(targetUrl, referer, isHls, audio) {
-  return Buffer.from(JSON.stringify({ u: targetUrl, r: referer || '', ...(isHls ? { h: 1 } : {}), ...(audio ? { a: audio } : {}) }), 'utf8')
-    .toString('base64').replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  const plain = JSON.stringify({ u: targetUrl, r: referer || '', ...(isHls ? { h: 1 } : {}), ...(audio ? { a: audio } : {}) });
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv('aes-256-gcm', PROXY_KEY, iv);
+  const enc = Buffer.concat([cipher.update(plain, 'utf8'), cipher.final()]);
+  return Buffer.concat([iv, cipher.getAuthTag(), enc]).toString('base64')
+    .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 function decodeProxy(token) {
-  const b64 = String(token || '').replace(/-/g, '+').replace(/_/g, '/');
-  return JSON.parse(Buffer.from(b64, 'base64').toString('utf8'));
+  const raw = Buffer.from(String(token || '').replace(/-/g, '+').replace(/_/g, '/'), 'base64');
+  const decipher = crypto.createDecipheriv('aes-256-gcm', PROXY_KEY, raw.subarray(0, 12));
+  decipher.setAuthTag(raw.subarray(12, 28));
+  return JSON.parse(Buffer.concat([decipher.update(raw.subarray(28)), decipher.final()]).toString('utf8'));
 }
 
 // Rewrite a CDN url → this addon's /proxy. Uses the request-scoped base url
@@ -1340,6 +1355,11 @@ builder.defineStreamHandler(async ({ type, id, config }) => {
 // ─────────────────────────────────────────
 const PORT = process.env.PORT || 7000;
 const app = express();
+
+// Don't advertise the stack: Express sends "X-Powered-By: Express" on every
+// response, which fingerprints the origin. (Upstream Server/Via/X-Powered-By
+// headers are already dropped — handleProxy forwards only a fixed whitelist.)
+app.disable('x-powered-by');
 
 // Run every request inside an ALS store carrying this request's public origin, so
 // proxify() (called deep inside the stream handler) can build absolute /proxy URLs.

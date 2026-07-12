@@ -4,6 +4,18 @@ A Stremio addon that brings **12,000+ Georgian dubbed movies and series** direct
 - **Adjaranet** (primary) — largest Georgian dubbed content library
 - **GEMovie** (fallback) — secondary source
 
+## 📦 Install (hosted)
+
+Paste this into Stremio (Settings → Addons → Add addon) or a browser client
+like stredio.vercel.app:
+
+```
+https://mercury-source.duckdns.org/manifest.json
+```
+
+Runs on an Oracle Cloud Always-Free VM — see [`deploy/oracle/README.md`](deploy/oracle/README.md).
+The sections below are only needed to run your **own** copy.
+
 ---
 
 ## Features

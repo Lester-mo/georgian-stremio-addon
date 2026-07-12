@@ -84,10 +84,11 @@ Browser-based clients are served over **HTTPS** and can't load an addon from
 plain `http://` on another device, and their in-browser player can't send the
 `Referer` headers the stream CDNs require. This addon proxies every stream
 server-side (adding the right `Referer`, rewriting HLS playlists, serving with
-open CORS + range/seek). The byte-heavy sources (ge.movie, UAFlix, kkphim) are
-relayed through a **Cloudflare Worker** (`WORKER_PROXY`) on Cloudflare's
-unmetered bandwidth, so the host serves only tiny JSON. For local use you just
-need to expose the addon over HTTPS with a tunnel.
+open CORS + range/seek). The non-IP-locked sources (ge.movie, UAFlix, kkphim)
+are relayed through a **Cloudflare Worker** (`WORKER_PROXY`) on Cloudflare's
+unmetered bandwidth, so the host serves only tiny JSON for them; **HDRezka**
+(Russian/original audio, IP-locked to the serving host) rides the addon's own
+proxy. For local use you just need to expose the addon over HTTPS with a tunnel.
 
 **1. Start a tunnel** (free, no account — [install cloudflared](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)):
 ```bash

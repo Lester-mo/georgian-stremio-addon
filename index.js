@@ -2,13 +2,16 @@ const { addonBuilder, getRouter } = require('stremio-addon-sdk');
 const express = require('express');
 const { AsyncLocalStorage } = require('async_hooks');
 const fetch = require('node-fetch');
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 
 // ─────────────────────────────────────────
 //  MANIFEST
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '3.2.5',
+  version: '3.3.0',
   name: 'Mercury',
   description: 'Dubbed movies & series — 🇬🇪 Georgian · 🇷🇺 Russian · 🇺🇦 Ukrainian · 🇬🇧 English',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
@@ -261,6 +264,62 @@ async function handleProxy(req, res) {
   if (!up.headers.get('accept-ranges')) res.setHeader('Accept-Ranges', 'bytes');
   up.body.on('error', () => { try { res.end(); } catch { /* client gone */ } });
   up.body.pipe(res);
+}
+
+// ─────────────────────────────────────────
+//  TMDB original-language lookup — used to label HDRezka's "Оригинал" track
+//  correctly: it's only English when the title's original language IS English;
+//  otherwise it's that original language and must be tagged "Original", not
+//  "English". The TMDB credential lives in the sibling STREAMFULL server/.env
+//  (TMDB_BEARER preferred, else TMDB_API_KEY); we read it best-effort. With no
+//  credential or on any failure we return null → caller treats it as English
+//  (safe default for the mostly-Hollywood catalog).
+// ─────────────────────────────────────────
+function readSiblingEnv() {
+  const out = {};
+  try {
+    const p = path.join(__dirname, '..', 'Movie Website', 'server', '.env');
+    if (!fs.existsSync(p)) return out;
+    for (const line of fs.readFileSync(p, 'utf8').split(/\r?\n/)) {
+      if (/^\s*#/.test(line)) continue;
+      const m = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)$/i);
+      if (m) out[m[1]] = m[2].trim().replace(/^["']|["']$/g, '');
+    }
+  } catch { /* ignore — degrade to English */ }
+  return out;
+}
+const _siblingEnv = readSiblingEnv();
+const TMDB_BEARER = (process.env.TMDB_BEARER || _siblingEnv.TMDB_BEARER || '').trim();
+const TMDB_KEY = (process.env.TMDB_API_KEY || _siblingEnv.TMDB_API_KEY || '').trim();
+
+// ISO-639-1 → display name (the few we're likely to meet; fall back to the code).
+const LANG_NAMES = {
+  en: 'English', ko: 'Korean', ja: 'Japanese', zh: 'Chinese', fr: 'French',
+  es: 'Spanish', de: 'German', it: 'Italian', pt: 'Portuguese', hi: 'Hindi',
+  ru: 'Russian', tr: 'Turkish', ka: 'Georgian', uk: 'Ukrainian', pl: 'Polish',
+  sv: 'Swedish', da: 'Danish', no: 'Norwegian', fi: 'Finnish', nl: 'Dutch',
+  th: 'Thai', id: 'Indonesian', ar: 'Arabic', he: 'Hebrew', fa: 'Persian',
+};
+const langName = code => LANG_NAMES[code] || (code ? code.toUpperCase() : 'Original');
+
+const _origLangCache = new Map();
+async function tmdbOriginalLang(tmdbId, type) {
+  if (!tmdbId || (!TMDB_BEARER && !TMDB_KEY)) return null;
+  const ck = `${type}_${tmdbId}`;
+  if (_origLangCache.has(ck)) return _origLangCache.get(ck);
+  try {
+    const kind = type === 'series' ? 'tv' : 'movie';
+    const url = `https://api.themoviedb.org/3/${kind}/${encodeURIComponent(tmdbId)}` +
+      (TMDB_BEARER ? '' : `?api_key=${encodeURIComponent(TMDB_KEY)}`);
+    const headers = { 'User-Agent': UA, Accept: 'application/json' };
+    if (TMDB_BEARER) headers.Authorization = `Bearer ${TMDB_BEARER}`;
+    const res = await fetch(url, { headers, timeout: 8000 });
+    if (!res.ok) { _origLangCache.set(ck, null); return null; }
+    const j = await res.json();
+    const lang = j && j.original_language ? String(j.original_language).toLowerCase() : null;
+    _origLangCache.set(ck, lang);
+    return lang;
+  } catch { return null; }
 }
 
 // ─────────────────────────────────────────
@@ -613,6 +672,249 @@ function gemRussianToStremio(resolved) {
 }
 
 // ─────────────────────────────────────────
+//  HDREZKA — Russian-AUDIO streams. Flow: search by title → film/series page →
+//  read the post id + default (active) translator → POST /ajax/get_cdn_series →
+//  a quality-tagged stream string. Decoded (plaintext now, kept trash-tolerant)
+//  into per-quality direct MP4s on the voidboost CDN. Tagged lang:'ru'.
+//
+//  hdrezka.me now guards pages/AJAX with an Anubis proof-of-work wall (2026-07).
+//  rezkaFetch() transparently solves it: on a challenge response it computes the
+//  PoW, calls pass-challenge for the site-wide `techaro.lol-anubis-auth` JWT
+//  (~1-week TTL), caches it, and retries. The voidboost CDN is IP-locked to the
+//  resolving server, so these streams ride the SELF proxy (origin bandwidth) —
+//  affordable again on the Oracle VM (10 TB/mo). See [[stream-proxy-architecture]].
+// ─────────────────────────────────────────
+const REZKA = 'https://hdrezka.me';
+const REZKA_REF = 'https://hdrezka.me/';
+
+// Cached Anubis auth cookie (a JWT valid site-wide for ~a week). Refreshed lazily
+// whenever a request comes back walled.
+let rezkaAuthCookie = null;
+
+// Solve one Anubis "fast"/"slow" PoW challenge from a walled page → the auth
+// cookie string ("techaro.lol-anubis-auth=…"), or null if it can't be solved.
+async function anubisSolve(html, verifyCookie, pageUrl) {
+  try {
+    const m = html.match(/id="anubis_challenge" type="application\/json">([\s\S]*?)<\/script>/);
+    if (!m) return null;
+    const ch = JSON.parse(m[1]);
+    const difficulty = ch.rules?.difficulty ?? 4;
+    const randomData = ch.challenge?.randomData;
+    const id = ch.challenge?.id;
+    if (!randomData || !id) return null;
+    const prefix = '0'.repeat(difficulty);
+    const t0 = Date.now();
+    let nonce = 0, hash;
+    // fast: sha256(randomData + nonce) until `difficulty` leading hex zeroes.
+    // Difficulty is tiny (2 ⇒ ~256 tries); cap the loop so a policy bump can't hang us.
+    for (; nonce < 5e7; nonce++) {
+      hash = crypto.createHash('sha256').update(randomData + nonce).digest('hex');
+      if (hash.startsWith(prefix)) break;
+    }
+    if (!hash.startsWith(prefix)) return null;
+    const q = new URLSearchParams({ id, response: hash, nonce: String(nonce), redir: pageUrl, elapsedTime: String(Date.now() - t0 || 1) });
+    const res = await fetch(`${REZKA}/.within.website/x/cmd/anubis/api/pass-challenge?${q}`, {
+      headers: { 'User-Agent': UA, Accept: 'text/html', Cookie: verifyCookie || '' }, redirect: 'manual', timeout: 12000,
+    });
+    const auth = (res.headers.raw()['set-cookie'] || []).map(c => c.split(';')[0]).find(c => c.startsWith('techaro.lol-anubis-auth='));
+    return auth || null;
+  } catch { return null; }
+}
+
+// fetch() wrapper for hdrezka that carries the cached auth cookie and, if a
+// response comes back as the Anubis wall, solves it once and retries. Always
+// returns { ok, status, body } — body is the response text (HTML or JSON string).
+async function rezkaFetch(url, opts = {}) {
+  const doFetch = () => fetch(url, {
+    ...opts,
+    headers: { 'User-Agent': UA, ...(opts.headers || {}), ...(rezkaAuthCookie ? { Cookie: rezkaAuthCookie } : {}) },
+    timeout: opts.timeout || 12000,
+  });
+  let res = await doFetch();
+  let body = await res.text();
+  if (/anubis_challenge/.test(body)) {
+    // Walled → solve with this response's verification cookie, cache auth, retry once.
+    const verify = (res.headers.raw()['set-cookie'] || []).map(c => c.split(';')[0]).find(c => c.startsWith('techaro.lol-anubis-cookie-verification='));
+    const auth = await anubisSolve(body, verify, url);
+    if (auth) {
+      rezkaAuthCookie = auth;
+      res = await doFetch();
+      body = await res.text();
+    }
+  }
+  return { ok: res.ok, status: res.status, body };
+}
+
+// HDRezka historically base64+junk-encodes the stream string; current builds ship
+// it as plaintext ("[360p]http…"). Decode only when it isn't already plaintext.
+function rezkaClearTrash(data) {
+  if (!data) return '';
+  if (data.trim().startsWith('[')) return data;          // already plaintext
+  const trashList = ['@', '#', '!', '^', '$'];
+  const codes = [];
+  for (let len = 2; len <= 4; len++) {
+    let combos = [''];
+    for (let i = 0; i < len; i++) {
+      const next = [];
+      for (const c of combos) for (const t of trashList) next.push(c + t);
+      combos = next;
+    }
+    for (const d of combos) codes.push(Buffer.from(d, 'utf-8').toString('base64'));
+  }
+  let str = data.replace(/#h/g, '').split('//_//').join('');
+  for (const code of codes) str = str.split(code).join('');
+  try { return Buffer.from(str + '==', 'base64').toString('utf-8'); } catch { return ''; }
+}
+
+// "[360p]urlA or urlB,[480p]urlC,…" → [{quality,url}], preferring a clean .mp4
+// over the ":hls:manifest.m3u8" wrapper (seekable + browser-native).
+function rezkaParseStreams(decoded) {
+  const out = [];
+  for (const block of (decoded || '').split(',')) {
+    const m = block.match(/^\s*\[([^\]]+)\]\s*(.+)$/);
+    if (!m) continue;
+    // HDRezka wraps premium qualities in HTML (e.g. <span ...>4K<img…></span>) — strip tags.
+    const quality = m[1].replace(/<[^>]*>/g, '').trim();
+    const urls = m[2].split(' or ').map(u => u.trim()).filter(Boolean);
+    let url = urls.find(u => /\.mp4(\?|$)/i.test(u)) || urls.find(u => !/manifest\.m3u8/i.test(u)) || urls[0];
+    if (url) url = url.replace(/:hls:manifest\.m3u8.*$/i, '');
+    if (url && /^https?:/.test(url)) out.push({ quality, url });
+  }
+  return out;
+}
+
+// Title search → the best film/series page URL. STRICT: the result card must
+// contain the searched title (normalized) — HDRezka's search is fuzzy word-match
+// and returns unrelated films for titles it doesn't index under the English name
+// (typical for Soviet classics), and rezka is only a fallback source: serving the
+// wrong movie is far worse than serving nothing. Year breaks ties among matches.
+const rzNorm = s => (s || '').toLowerCase().replace(/[^a-z0-9а-яё]+/gi, ' ').replace(/\s+/g, ' ').trim();
+async function rezkaSearch(name, year, wantSeries) {
+  if (!name) return null;
+  try {
+    const res = await rezkaFetch(`${REZKA}/engine/ajax/search.php`, {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/x-www-form-urlencoded', Referer: REZKA_REF },
+      body: `q=${encodeURIComponent(name)}`, timeout: 9000,
+    });
+    if (!res.ok) return null;
+    const html = res.body;
+    const items = [...html.matchAll(/<a href="(https?:\/\/[^"]+\.html)"[^>]*>([\s\S]*?)<\/a>/g)].map(m => ({ url: m[1], block: m[2] }));
+    if (!items.length) return null;
+    // HDRezka URL categories: /films|cartoons → movies, /series|animation → series.
+    const isSeriesUrl = u => /\/(series|animation)\//i.test(u);
+    const pool = items.filter(it => wantSeries ? isSeriesUrl(it.url) : !isSeriesUrl(it.url));
+    const list = pool.length ? pool : items;
+    const matched = list.filter(it => rzNorm(it.block.replace(/<[^>]*>/g, ' ')).includes(rzNorm(name)));
+    if (!matched.length) return null;
+    const byYear = year ? matched.find(it => it.block.includes(String(year))) : null;
+    return (byYear || matched[0]).url;
+  } catch { return null; }
+}
+
+// Film/series page → { postId, translatorId (default Russian dub), isSeries }.
+async function rezkaPageInfo(pageUrl) {
+  try {
+    const res = await rezkaFetch(pageUrl, { headers: { Accept: 'text/html', Referer: REZKA_REF }, timeout: 12000 });
+    if (!res.ok) return null;
+    const html = res.body;
+    const postId = (html.match(/initCDN(?:Movies|Series)Events\((\d+)/) || html.match(/postId\s*[:=]\s*(\d+)/) || html.match(/data-post_id="(\d+)"/) || [])[1] || null;
+    const active = html.match(/b-translator__item[^>]*\bactive\b[^>]*data-translator_id="(\d+)"/i)
+      || html.match(/data-translator_id="(\d+)"/);
+    const translatorId = (active && active[1]) || '0';
+    const isSeries = /initCDNSeriesEvents/.test(html) || /\/(series|animation)\//i.test(pageUrl);
+    return postId ? { postId, translatorId, isSeries } : null;
+  } catch { return null; }
+}
+
+// Resolve Russian-dub streams for a movie or a specific episode.
+async function rezkaResolve(name, year, type, season, episode) {
+  try {
+    const pageUrl = await rezkaSearch(name, year, type === 'series');
+    if (!pageUrl) return [];
+    const info = await rezkaPageInfo(pageUrl);
+    if (!info || !info.postId) return [];
+    const body = type === 'series'
+      ? `id=${info.postId}&translator_id=${info.translatorId}&season=${season}&episode=${episode}&action=get_stream`
+      : `id=${info.postId}&translator_id=${info.translatorId}&action=get_movie`;
+    const r = await rezkaFetch(`${REZKA}/ajax/get_cdn_series/?t=${Date.now()}`, {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/x-www-form-urlencoded', Referer: pageUrl },
+      body, timeout: 14000,
+    });
+    if (!r.ok) return [];
+    const j = JSON.parse(r.body);
+    if (!j || !j.success || !j.url) return [];
+    return rezkaParseStreams(rezkaClearTrash(j.url));
+  } catch { return []; }
+}
+
+// → Stremio rows (Russian audio), single best quality (matches ge.movie's clean
+// one-row UX, addon-name-only labels). Rides the SELF proxy — the voidboost token
+// is issued to the resolving server's IP, so its bytes must come from this origin.
+function rezkaToStremio(streams) {
+  if (!streams.length) return [];
+  const best = streams.slice().sort((a, b) => qualityScore(b.quality) - qualityScore(a.quality))[0];
+  return [{
+    url: proxify(best.url, REZKA_REF),
+    behaviorHints: { notWebReady: false, proxyHeaders: { request: { Referer: REZKA_REF, 'User-Agent': UA } }, streamType: 'mp4', lang: 'ru', audioLang: 'ru' },
+  }];
+}
+
+// HDRezka page → the ORIGINAL-audio translator ("Оригинал (+субтитры)"). For an
+// English-language title this original track IS the English audio (HDRezka's other
+// tracks are Russian/Ukrainian dub studios). Returns { postId, translatorId }.
+async function rezkaEnglishInfo(pageUrl) {
+  try {
+    const res = await rezkaFetch(pageUrl, { headers: { Accept: 'text/html', Referer: REZKA_REF }, timeout: 12000 });
+    if (!res.ok) return null;
+    const html = res.body;
+    const postId = (html.match(/initCDN(?:Movies|Series)Events\((\d+)/) || html.match(/postId\s*[:=]\s*(\d+)/) || html.match(/data-post_id="(\d+)"/) || [])[1] || null;
+    if (!postId) return null;
+    const items = [...html.matchAll(/data-translator_id="(\d+)"[^>]*(?:title="([^"]*)")?[^>]*>\s*([^<]{0,40})/gi)]
+      .map(m => ({ id: m[1], title: (m[2] || m[3] || '').trim() }));
+    const orig = items.find(t => /ориг|original/i.test(t.title));
+    return orig ? { postId, translatorId: orig.id } : null;
+  } catch { return null; }
+}
+
+// Resolve HDRezka's original (English) audio for a movie/episode → a 🇬🇧 row.
+// Prefers a free numeric quality (360p–1080p) over premium-gated 1080p Ultra/2K/4K.
+async function rezkaEnglish(name, year, type, season, episode) {
+  try {
+    const pageUrl = await rezkaSearch(name, year, type === 'series');
+    if (!pageUrl) return [];
+    const info = await rezkaEnglishInfo(pageUrl);
+    if (!info || !info.postId) return [];
+    const body = type === 'series'
+      ? `id=${info.postId}&translator_id=${info.translatorId}&season=${season}&episode=${episode}&action=get_stream`
+      : `id=${info.postId}&translator_id=${info.translatorId}&action=get_movie`;
+    const r = await rezkaFetch(`${REZKA}/ajax/get_cdn_series/?t=${Date.now()}`, {
+      method: 'POST',
+      headers: { 'X-Requested-With': 'XMLHttpRequest', 'Content-Type': 'application/x-www-form-urlencoded', Referer: pageUrl },
+      body, timeout: 14000,
+    });
+    if (!r.ok) return [];
+    const j = JSON.parse(r.body);
+    if (!j || !j.success || !j.url) return [];
+    const streams = rezkaParseStreams(rezkaClearTrash(j.url));
+    if (!streams.length) return [];
+    const free = streams.filter(s => /^\d{3,4}p$/i.test(s.quality));
+    const best = (free.length ? free : streams).slice().sort((a, b) => qualityScore(b.quality) - qualityScore(a.quality))[0];
+    // English subtitles bundled with the original track, if HDRezka shipped any.
+    const subs = [];
+    if (typeof j.subtitle === 'string') {
+      for (const m of j.subtitle.matchAll(/\[([^\]]+)\](https?:\/\/[^,]+)/g)) subs.push({ id: 'rz' + subs.length, url: proxify(m[2], REZKA_REF), lang: m[1] });
+    }
+    return [{
+      url: proxify(best.url, REZKA_REF),
+      subtitles: subs,
+      behaviorHints: { notWebReady: false, proxyHeaders: { request: { Referer: REZKA_REF, 'User-Agent': UA } }, streamType: 'mp4', lang: 'en', audioLang: 'en' },
+    }];
+  } catch { return []; }
+}
+
+// ─────────────────────────────────────────
 //  UAFLIX (uafix.net) — Ukrainian-AUDIO streams via the zetvideo.net player (open
 //  HLS, no token). Flow: DLE search → film/series page → zetvideo iframe → the
 //  embed exposes file:"…/hls/index.m3u8" directly. Tagged lang:'uk'.
@@ -882,16 +1184,38 @@ builder.defineMetaHandler(async ({ type, id }) => {
   }
 });
 
-// English (en) cascade. Primary is ge.movie's English track; when ge.movie has no
-// English audio, fall back to kkphim (original audio, may carry burned-in VN subs).
-// Both stream through the Cloudflare Worker, so English never touches the origin.
+// Correct the audioLang of an HDRezka original-audio row when the title's original
+// language is NOT English (TMDB). Rows carry no name/title anymore (addon-name-only
+// UX), so only the hint changes; it stays lang:'en' as the closest-to-source option.
+function relabelOriginal(rows, code) {
+  return rows.map(r => ({ ...r, behaviorHints: { ...r.behaviorHints, audioLang: code || 'original' } }));
+}
+
+// English (en) cascade — Worker-able sources first, origin-bound HDRezka after,
+// kkphim last (burned-in VN subs risk):
+//   • ge.movie English track (Worker) → HDRezka "Оригинал" (self proxy; real
+//     English only when TMDB says the title's original language IS English —
+//     otherwise the row keeps an honest audioLang via relabelOriginal) → kkphim.
+// The origin is an Oracle free VM (10 TB/mo), so HDRezka bytes are affordable
+// again — but the Worker-first order still keeps most traffic on Cloudflare.
 async function resolveEnglishCascade(meta, type, season, episode) {
   const { name, year, tmdb } = meta;
+  const origLang = await tmdbOriginalLang(tmdb, type);   // 'en' | 'ko' | … | null
+  const englishOrigin = !origLang || origLang === 'en';  // null (unknown) → treat as English
 
+  // Worker-able English first: ge.movie, then UAFlix.
   if (tmdb) {
     const en = gemEnglishToStremio(await gemEnglish(tmdb, type, season, episode).catch(() => []));
     if (en.length) return en;
   }
+
+  // Next: HDRezka's original track (origin-bound self proxy). For an English-origin
+  // title that IS the English audio; otherwise correct the audioLang hint.
+  const rez = name ? await rezkaEnglish(name, year, type, season, episode).catch(() => []) : [];
+  if (rez.length) return englishOrigin ? rez : relabelOriginal(rez, origLang);
+
+  // Final fallback: kkphim original audio (English, possibly with burned-in VN
+  // subs). Worker-able and TMDB-matched, but lowest priority due to the subtitles.
   if (name && (tmdb || year)) {
     const kk = await kkphimEnglish(name, tmdb, year, type, season, episode).catch(() => []);
     if (kk.length) return kk;
@@ -907,9 +1231,9 @@ builder.defineStreamHandler(async ({ type, id }) => {
     if (type !== 'movie' && type !== 'series') return { streams: [] };
 
     // One id → title/year/tmdb, then resolve the language sources in parallel:
-    //   ka → ge.movie · ru → ge.movie ONLY (omitted if absent) · uk → UAFlix ·
-    //   en → ge.movie English, else kkphim. Every source streams through the
-    //   Cloudflare Worker, so nothing here touches the origin's bandwidth.
+    //   ka → ge.movie · ru → ge.movie, else HDRezka (self proxy) · uk → UAFlix ·
+    //   en → ge.movie English → HDRezka original → kkphim. Worker-able sources
+    //   ride Cloudflare; only HDRezka's IP-locked bytes use the origin.
     const baseId = type === 'series' ? id.split(':')[0] : id;
     const season = type === 'series' ? parseInt(id.split(':')[1] || '1', 10) : 1;
     const episode = type === 'series' ? parseInt(id.split(':')[2] || '1', 10) : 1;
@@ -919,17 +1243,23 @@ builder.defineStreamHandler(async ({ type, id }) => {
 
     const [ka, ru, uk, en] = await Promise.all([
       tmdb ? (type === 'series' ? gemEpisode(tmdb, season, episode) : gemMovie(tmdb)) : Promise.resolve([]),
-      tmdb ? gemRussian(tmdb, type, season, episode) : Promise.resolve([]),
+      // Russian: ge.movie's track (Worker) first; HDRezka dub as the fallback.
+      (async () => {
+        const gem = tmdb ? await gemRussian(tmdb, type, season, episode).catch(() => []) : [];
+        if (gem.length) return gemRussianToStremio(gem);
+        const rez = name ? await rezkaResolve(name, year, type, season, episode).catch(() => []) : [];
+        return rezkaToStremio(rez);
+      })(),
       name ? uafixResolve(name, year, type, season, episode) : Promise.resolve([]),
       resolveEnglishCascade({ name, year, tmdb }, type, season, episode),
     ]);
 
     return {
       streams: [
-        ...en,                       // 🇬🇧 English (ge.movie → kkphim)
-        ...gemToStremio(ka),         // 🇬🇪 Georgian (ge.movie)
-        ...gemRussianToStremio(ru),  // 🇷🇺 Russian (ge.movie only)
-        ...uafixToStremio(uk),       // 🇺🇦 Ukrainian (UAFlix)
+        ...en,                   // 🇬🇧 English (ge.movie → HDRezka original → kkphim)
+        ...gemToStremio(ka),     // 🇬🇪 Georgian (ge.movie)
+        ...ru,                   // 🇷🇺 Russian (ge.movie → HDRezka)
+        ...uafixToStremio(uk),   // 🇺🇦 Ukrainian (UAFlix)
       ],
     };
   } catch (e) {

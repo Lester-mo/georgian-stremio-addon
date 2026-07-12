@@ -11,7 +11,7 @@ const path = require('path');
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '3.4.0',
+  version: '3.4.1',
   name: 'Mercury',
   description: 'Dubbed movies & series — 🇬🇪 Georgian · 🇷🇺 Russian · 🇺🇦 Ukrainian · 🇬🇧 English',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
@@ -1354,6 +1354,76 @@ app.options('/proxy', (req, res) => {
 });
 app.get('/proxy', handleProxy);
 
+// ─────────────────────────────────────────
+//  WEB PAGES (landing + configure)
+//  Shared dark "liquid mercury" shell: chrome-gradient wordmark, an orbiting
+//  accent dot, film grain, and a copyable install box. All inline — no assets
+//  to serve, no build step; only the Google Fonts CSS is external.
+// ─────────────────────────────────────────
+const PAGE_CSS = `
+:root{--bg:#08080d;--line:#232334;--txt:#d7d7e2;--dim:#7c7c93;--faint:#54546a;--acc:#8b6cff;--code:#b9a8ff}
+*{box-sizing:border-box;margin:0}
+html{color-scheme:dark}
+::selection{background:rgba(139,108,255,.35)}
+body{background:var(--bg);color:var(--txt);font:15px/1.7 Sora,system-ui,sans-serif;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:56px 20px;overflow-x:hidden}
+body::before{content:"";position:fixed;inset:0;pointer-events:none;background:radial-gradient(620px 420px at 50% -8%,rgba(139,108,255,.16),transparent 70%),radial-gradient(900px 600px at 85% 112%,rgba(70,60,120,.14),transparent 70%)}
+body::after{content:"";position:fixed;inset:0;pointer-events:none;opacity:.05;mix-blend-mode:overlay;background:url('data:image/svg+xml;utf8,%3Csvg xmlns="http://www.w3.org/2000/svg" width="180" height="180"%3E%3Cfilter id="n"%3E%3CfeTurbulence type="fractalNoise" baseFrequency=".85" numOctaves="2"/%3E%3C/filter%3E%3Crect width="180" height="180" filter="url(%23n)"/%3E%3C/svg%3E')}
+.orbit{position:fixed;left:50%;top:-210px;width:480px;height:480px;margin-left:-240px;border-radius:50%;border:1px dashed rgba(139,108,255,.16);animation:spin 60s linear infinite;pointer-events:none}
+.orbit i{position:absolute;top:-4px;left:50%;width:7px;height:7px;margin-left:-4px;border-radius:50%;background:var(--acc);box-shadow:0 0 16px 3px rgba(139,108,255,.8)}
+@keyframes spin{to{transform:rotate(360deg)}}
+.wrap{max-width:560px;width:100%;position:relative}
+.wrap>*{animation:rise .6s cubic-bezier(.2,.7,.3,1) backwards}
+.wrap>:nth-child(2){animation-delay:.07s}.wrap>:nth-child(3){animation-delay:.14s}.wrap>:nth-child(4){animation-delay:.21s}.wrap>:nth-child(5){animation-delay:.28s}.wrap>:nth-child(6){animation-delay:.35s}
+@keyframes rise{from{opacity:0;transform:translateY(14px)}}
+.eyebrow{font:600 11px/1 "JetBrains Mono",monospace;letter-spacing:.35em;text-transform:uppercase;color:var(--dim)}
+h1{font-family:Unbounded,sans-serif;font-weight:800;font-size:clamp(42px,10vw,68px);letter-spacing:.02em;margin:14px 0 10px;background:linear-gradient(160deg,#fff 8%,#cacada 36%,#6f6f8a 54%,#e8e8f4 80%);-webkit-background-clip:text;background-clip:text;color:transparent}
+h1.sub{font-size:clamp(30px,7vw,42px)}
+.tagline{color:var(--dim);max-width:46ch}
+.langs{display:flex;flex-wrap:wrap;gap:8px;margin:26px 0 28px}
+.chip{border:1px solid var(--line);background:rgba(255,255,255,.03);border-radius:999px;padding:7px 14px;font-size:13.5px}
+.card{background:linear-gradient(180deg,rgba(255,255,255,.035),rgba(255,255,255,.015));border:1px solid var(--line);border-radius:16px;padding:22px;margin-top:26px}
+.label{font:600 10.5px/1 "JetBrains Mono",monospace;letter-spacing:.3em;text-transform:uppercase;color:var(--dim);margin-bottom:12px}
+.urlbox{display:flex;gap:10px;align-items:center;background:#0b0b12;border:1px solid var(--line);border-radius:10px;padding:11px 9px 11px 14px}
+.urlbox code{font:12.5px/1.5 "JetBrains Mono",monospace;color:var(--code);word-break:break-all;flex:1}
+.copy{font:600 12px Sora,sans-serif;color:var(--txt);background:rgba(255,255,255,.06);border:1px solid var(--line);border-radius:7px;padding:7px 13px;cursor:pointer;transition:.2s;flex:none}
+.copy:hover{background:rgba(139,108,255,.18);border-color:rgba(139,108,255,.4)}
+.btns{display:flex;gap:10px;margin-top:16px;flex-wrap:wrap}
+.btn{display:inline-block;font:600 15px Sora,sans-serif;background:linear-gradient(180deg,#9a7dff,#7a58f0);color:#fff;padding:13px 26px;border-radius:10px;text-decoration:none;border:0;cursor:pointer;box-shadow:0 8px 24px -8px rgba(139,108,255,.6);transition:.2s}
+.btn:hover{transform:translateY(-1px);box-shadow:0 12px 30px -8px rgba(139,108,255,.75)}
+.btn.ghost{background:transparent;border:1px solid var(--line);color:var(--txt);box-shadow:none}
+.btn.ghost:hover{border-color:rgba(139,108,255,.5);transform:none}
+.row{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px 2px;border-bottom:1px solid var(--line);cursor:pointer}
+.row:last-of-type{border-bottom:0;margin-bottom:6px}
+.row span{font-size:15.5px}
+.sw{appearance:none;-webkit-appearance:none;width:46px;height:26px;border-radius:999px;background:#1c1c2a;border:1px solid var(--line);position:relative;cursor:pointer;transition:.25s;flex:none;margin:0}
+.sw::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#8c8ca4;transition:.25s}
+.sw:checked{background:linear-gradient(180deg,#9a7dff,#7a58f0);border-color:transparent}
+.sw:checked::after{left:23px;background:#fff}
+footer{margin-top:28px;color:var(--faint);font:12.5px "JetBrains Mono",monospace}
+footer a{color:var(--dim)}
+@media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}`;
+
+function pageShell(title, inner, script = '') {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
+    `<meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>${title}</title>` +
+    `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>` +
+    `<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;800&family=Sora:wght@400;600&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">` +
+    `<style>${PAGE_CSS}</style></head><body>` +
+    `<div class="orbit"><i></i></div><main class="wrap">${inner}</main>` +
+    (script ? `<script>${script}</script>` : '') + `</body></html>`;
+}
+
+// Both pages show the install URL with a copy button; #url is filled (or
+// refreshed) by the page's own script before this runs on configure.
+const COPY_JS = `
+document.getElementById('copy').addEventListener('click', () => {
+  navigator.clipboard.writeText(document.getElementById('url').textContent).then(() => {
+    const b = document.getElementById('copy');
+    b.textContent = 'Copied'; setTimeout(() => { b.textContent = 'Copy'; }, 1200);
+  });
+});`;
+
 // Configure page — the Stremio apps open <transport base>/configure when the
 // manifest sets behaviorHints.configurable. The chosen languages are embedded
 // in the install URL as a URL-encoded JSON path segment, which the SDK router
@@ -1363,29 +1433,31 @@ function configurePage(req, res) {
   let current = {};
   try { current = JSON.parse(decodeURIComponent(req.params.config || '')) || {}; } catch { /* fresh install */ }
   const base = reqBaseUrl(req);
-  const box = c => `<label style="display:block;margin:10px 0;font-size:18px;cursor:pointer">` +
-    `<input type="checkbox" name="${c.key}" ${langOn(current, c.key) ? 'checked' : ''} style="width:18px;height:18px;vertical-align:-3px;margin-right:10px">${c.title}</label>`;
+  const rows = manifest.config.map(c =>
+    `<label class="row"><span>${c.title}</span>` +
+    `<input class="sw" type="checkbox" name="${c.key}" ${langOn(current, c.key) ? 'checked' : ''}></label>`).join('');
+  const inner =
+    `<p class="eyebrow">${manifest.name} · configure</p>` +
+    `<h1 class="sub">Languages</h1>` +
+    `<p class="tagline">Pick which audio languages show up in your stream list.</p>` +
+    `<div class="card"><form id="f">${rows}</form>` +
+    `<p class="label" style="margin-top:16px">Install URL</p>` +
+    `<div class="urlbox"><code id="url"></code><button type="button" class="copy" id="copy">Copy</button></div>` +
+    `<div class="btns"><a id="install" class="btn">Install in Stremio</a><a class="btn ghost" href="/">Back</a></div></div>`;
+  const script = `
+    const f = document.getElementById('f');
+    function update() {
+      const cfg = {};
+      let allOn = true;
+      for (const el of f.elements) { cfg[el.name] = el.checked; if (!el.checked) allOn = false; }
+      const seg = allOn ? '' : '/' + encodeURIComponent(JSON.stringify(cfg));
+      const url = ${JSON.stringify(base)} + seg + '/manifest.json';
+      document.getElementById('url').textContent = url;
+      document.getElementById('install').href = url.replace(/^https?:\\/\\//, 'stremio://');
+    }
+    f.addEventListener('change', update); update();` + COPY_JS;
   res.setHeader('content-type', 'text/html; charset=utf-8');
-  res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
-    `<title>${manifest.name} — Configure</title>` +
-    `<body style="font-family:system-ui;max-width:640px;margin:40px auto;padding:0 16px;line-height:1.6">` +
-    `<h1>${manifest.name}</h1><p>Pick which audio languages show up in your stream list:</p>` +
-    `<form id="f">${manifest.config.map(box).join('')}</form>` +
-    `<p><a id="install" style="display:inline-block;background:#7b5bf5;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:600">Install</a></p>` +
-    `<p style="color:#666">Or copy the install URL:<br><code id="url" style="word-break:break-all"></code></p>` +
-    `<script>
-      const f = document.getElementById('f');
-      function update() {
-        const cfg = {};
-        let allOn = true;
-        for (const el of f.elements) { cfg[el.name] = el.checked; if (!el.checked) allOn = false; }
-        const seg = allOn ? '' : '/' + encodeURIComponent(JSON.stringify(cfg));
-        const url = ${JSON.stringify(base)} + seg + '/manifest.json';
-        document.getElementById('url').textContent = url;
-        document.getElementById('install').href = url.replace(/^https?:\\/\\//, 'stremio://');
-      }
-      f.addEventListener('change', update); update();
-    </script></body>`);
+  res.end(pageShell(`${manifest.name} — Configure`, inner, script));
 }
 app.get('/configure', configurePage);
 app.get('/:config/configure', configurePage);
@@ -1393,15 +1465,22 @@ app.get('/:config/configure', configurePage);
 // Addon protocol routes (manifest, catalog, meta, stream) — CORS handled by the SDK router.
 app.use(getRouter(builder.getInterface()));
 
-// Minimal landing page with the install URL (the SDK's serveHTTP normally serves this).
+// Landing page with the install URL (the SDK's serveHTTP normally serves this).
 app.get('/', (req, res) => {
   const base = reqBaseUrl(req);
+  const chips = manifest.config.map(c => `<span class="chip">${c.title.replace(' streams', '')}</span>`).join('');
+  const inner =
+    `<p class="eyebrow">Stremio addon · v${manifest.version}</p>` +
+    `<h1>${manifest.name}</h1>` +
+    `<p class="tagline">Dubbed movies &amp; series, in the audio you want.</p>` +
+    `<div class="langs">${chips}</div>` +
+    `<div class="card"><p class="label">Install URL</p>` +
+    `<div class="urlbox"><code id="url">${base}/manifest.json</code><button type="button" class="copy" id="copy">Copy</button></div>` +
+    `<div class="btns"><a class="btn" href="${base.replace(/^https?:\/\//, 'stremio://')}/manifest.json">Install in Stremio</a>` +
+    `<a class="btn ghost" href="/configure">Configure</a></div></div>` +
+    `<footer>${manifest.id} · streams only, no catalogs</footer>`;
   res.setHeader('content-type', 'text/html; charset=utf-8');
-  res.end(`<!doctype html><meta charset="utf-8"><title>${manifest.name}</title>` +
-    `<body style="font-family:system-ui;max-width:640px;margin:40px auto;padding:0 16px;line-height:1.6">` +
-    `<h1>${manifest.name}</h1><p>${manifest.description}</p>` +
-    `<p><b>Install URL:</b> <code>${base}/manifest.json</code></p>` +
-    `<p><a href="/configure">Configure</a> — choose which audio languages to show.</p></body>`);
+  res.end(pageShell(manifest.name, inner, COPY_JS));
 });
 
 app.listen(PORT, () => {

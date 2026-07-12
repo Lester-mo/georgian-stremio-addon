@@ -104,12 +104,10 @@ The trycloudflare URL changes every time you restart the tunnel; re-run steps
 
 ## Run on a Server (optional, so you don't need to keep your PC on)
 
-You can deploy this to any free Node.js host like [Railway](https://railway.app) or [Render](https://render.com):
-
-1. Push the folder to a GitHub repo
-2. Connect to Railway/Render
-3. Set start command: `node index.js`
-4. Use the public URL instead of `localhost:7000` when installing in Stremio
+Production runs on an **Oracle Cloud Always-Free VM** — see
+[`deploy/oracle/README.md`](deploy/oracle/README.md) for the full setup
+(one-shot script: Node + systemd service + Caddy HTTPS + DuckDNS).
+Render was abandoned: its free bandwidth quota can't carry proxied video.
 
 ---
 

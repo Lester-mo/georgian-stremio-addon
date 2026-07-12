@@ -11,7 +11,7 @@ const path = require('path');
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '3.4.1',
+  version: '3.4.2',
   name: 'Mercury',
   description: 'Dubbed movies & series — 🇬🇪 Georgian · 🇷🇺 Russian · 🇺🇦 Ukrainian · 🇬🇧 English',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
@@ -1399,8 +1399,7 @@ h1.sub{font-size:clamp(30px,7vw,42px)}
 .sw::after{content:"";position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#8c8ca4;transition:.25s}
 .sw:checked{background:linear-gradient(180deg,#9a7dff,#7a58f0);border-color:transparent}
 .sw:checked::after{left:23px;background:#fff}
-footer{margin-top:28px;color:var(--faint);font:12.5px "JetBrains Mono",monospace}
-footer a{color:var(--dim)}
+.flag{width:20px;height:15px;border-radius:3px;margin-right:9px;vertical-align:-2px}
 @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}`;
 
 function pageShell(title, inner, script = '') {
@@ -1412,6 +1411,15 @@ function pageShell(title, inner, script = '') {
     `<style>${PAGE_CSS}</style></head><body>` +
     `<div class="orbit"><i></i></div><main class="wrap">${inner}</main>` +
     (script ? `<script>${script}</script>` : '') + `</body></html>`;
+}
+
+// Windows renders flag emoji as bare letter pairs ("GE"), so the pages use
+// tiny CDN flag images instead; the emoji stay in the manifest titles for
+// Stremio's own UI.
+const LANG_CC = { en: 'gb', ka: 'ge', ru: 'ru', uk: 'ua' };
+function langFlag(key) {
+  const cc = LANG_CC[key];
+  return cc ? `<img class="flag" src="https://flagcdn.com/20x15/${cc}.png" srcset="https://flagcdn.com/40x30/${cc}.png 2x" alt="">` : '';
 }
 
 // Both pages show the install URL with a copy button; #url is filled (or
@@ -1434,7 +1442,7 @@ function configurePage(req, res) {
   try { current = JSON.parse(decodeURIComponent(req.params.config || '')) || {}; } catch { /* fresh install */ }
   const base = reqBaseUrl(req);
   const rows = manifest.config.map(c =>
-    `<label class="row"><span>${c.title}</span>` +
+    `<label class="row"><span>${langFlag(c.key)}${c.title.replace(/^\S+\s/, '')}</span>` +
     `<input class="sw" type="checkbox" name="${c.key}" ${langOn(current, c.key) ? 'checked' : ''}></label>`).join('');
   const inner =
     `<p class="eyebrow">${manifest.name} · configure</p>` +
@@ -1468,17 +1476,17 @@ app.use(getRouter(builder.getInterface()));
 // Landing page with the install URL (the SDK's serveHTTP normally serves this).
 app.get('/', (req, res) => {
   const base = reqBaseUrl(req);
-  const chips = manifest.config.map(c => `<span class="chip">${c.title.replace(' streams', '')}</span>`).join('');
+  const chips = manifest.config.map(c =>
+    `<span class="chip">${langFlag(c.key)}${c.title.replace(/^\S+\s/, '').replace(' streams', '')}</span>`).join('');
   const inner =
-    `<p class="eyebrow">Stremio addon · v${manifest.version}</p>` +
+    `<p class="eyebrow">v${manifest.version}</p>` +
     `<h1>${manifest.name}</h1>` +
     `<p class="tagline">Dubbed movies &amp; series, in the audio you want.</p>` +
     `<div class="langs">${chips}</div>` +
     `<div class="card"><p class="label">Install URL</p>` +
     `<div class="urlbox"><code id="url">${base}/manifest.json</code><button type="button" class="copy" id="copy">Copy</button></div>` +
     `<div class="btns"><a class="btn" href="${base.replace(/^https?:\/\//, 'stremio://')}/manifest.json">Install in Stremio</a>` +
-    `<a class="btn ghost" href="/configure">Configure</a></div></div>` +
-    `<footer>${manifest.id} · streams only, no catalogs</footer>`;
+    `<a class="btn ghost" href="/configure">Configure</a></div></div>`;
   res.setHeader('content-type', 'text/html; charset=utf-8');
   res.end(pageShell(manifest.name, inner, COPY_JS));
 });

@@ -211,8 +211,10 @@ function workerBlocked(url) {
 function workerProxify(url, referer, isHls, audio) {
   if (!url) return url;
   if (!WORKER_PROXY || workerBlocked(url)) return proxify(url, referer, isHls, audio);
-  return `${WORKER_PROXY}/stream-proxy?src=${encodeURIComponent(url)}` +
-    `&ref=${encodeURIComponent(referer || '')}${isHls ? '&t=hls' : ''}`;
+  // Sealed token (same AES-GCM format as the self proxy) so the Worker URL no
+  // longer exposes the upstream host/Referer in its query string. The Worker
+  // shares PROXY_SECRET and decrypts with the same key.
+  return `${WORKER_PROXY}/stream-proxy?d=${encodeProxy(url, referer, isHls)}`;
 }
 
 const HLS_RE = /\.m3u8(\?|$)/i;
@@ -230,7 +232,7 @@ function rewritePlaylist(text, playlistUrl, referer, base, audio) {
     const abs = new URL(u, playlistUrl).toString();
     if (asPlaylist || !WORKER_PROXY || workerBlocked(abs))
       return `${base}/proxy?d=${encodeProxy(abs, referer, asPlaylist)}`;
-    return `${WORKER_PROXY}/stream-proxy?src=${encodeURIComponent(abs)}&ref=${encodeURIComponent(referer || '')}`;
+    return `${WORKER_PROXY}/stream-proxy?d=${encodeProxy(abs, referer)}`;
   };
   // Audio pinning: keep only the requested language's TYPE=AUDIO rendition and
   // force it DEFAULT — players play the master's DEFAULT track regardless of

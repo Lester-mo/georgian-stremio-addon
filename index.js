@@ -11,7 +11,7 @@ const path = require('path');
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '3.3.0',
+  version: '3.4.0',
   name: 'Mercury',
   description: 'Dubbed movies & series — 🇬🇪 Georgian · 🇷🇺 Russian · 🇺🇦 Ukrainian · 🇬🇧 English',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
@@ -20,7 +20,18 @@ const manifest = {
   types: ['movie', 'series'],
   idPrefixes: ['tt', 'adj_'],
   catalogs: [],
-  behaviorHints: { adult: false, p2p: false }
+  // Users can toggle which audio languages show up in the stream list. The
+  // chosen config rides the install URL as a path segment
+  // (/<url-encoded-json>/manifest.json) — the SDK router parses it and passes
+  // it to the stream handler as args.config. "configurable" makes the Stremio
+  // apps show a Configure button that opens <base>/configure.
+  config: [
+    { key: 'en', type: 'checkbox', title: '🇬🇧 English streams', default: 'checked' },
+    { key: 'ka', type: 'checkbox', title: '🇬🇪 Georgian streams', default: 'checked' },
+    { key: 'ru', type: 'checkbox', title: '🇷🇺 Russian streams', default: 'checked' },
+    { key: 'uk', type: 'checkbox', title: '🇺🇦 Ukrainian streams', default: 'checked' }
+  ],
+  behaviorHints: { adult: false, p2p: false, configurable: true }
 };
 
 const builder = new addonBuilder(manifest);
@@ -1268,7 +1279,15 @@ async function resolveEnglishCascade(meta, type, season, episode) {
 // ─────────────────────────────────────────
 //  STREAM HANDLER
 // ─────────────────────────────────────────
-builder.defineStreamHandler(async ({ type, id }) => {
+// A language is on unless the user's config explicitly unchecked it. Both our
+// /configure page and Stremio's own config form serialize checkboxes loosely,
+// so accept any truthy spelling and treat "missing" (default install) as on.
+function langOn(config, key) {
+  const v = (config || {})[key];
+  return v === undefined || v === true || v === 'true' || v === 'checked' || v === 'on';
+}
+
+builder.defineStreamHandler(async ({ type, id, config }) => {
   try {
     if (type !== 'movie' && type !== 'series') return { streams: [] };
 
@@ -1283,17 +1302,20 @@ builder.defineStreamHandler(async ({ type, id }) => {
     const meta = await metaForId(baseId, type);
     const { name, year, tmdb } = meta;
 
+    // Disabled languages are skipped entirely (no upstream fetches), not just
+    // filtered out of the response.
     const [ka, ru, uk, en] = await Promise.all([
-      tmdb ? (type === 'series' ? gemEpisode(tmdb, season, episode) : gemMovie(tmdb)) : Promise.resolve([]),
+      langOn(config, 'ka') && tmdb ? (type === 'series' ? gemEpisode(tmdb, season, episode) : gemMovie(tmdb)) : Promise.resolve([]),
       // Russian: ge.movie's track (Worker) first; HDRezka dub as the fallback.
       (async () => {
+        if (!langOn(config, 'ru')) return [];
         const gem = tmdb ? await gemRussian(tmdb, type, season, episode).catch(() => []) : [];
         if (gem.length) return gemRussianToStremio(gem);
         const rez = name ? await rezkaResolve(name, year, type, season, episode, baseId).catch(() => []) : [];
         return rezkaToStremio(rez);
       })(),
-      name ? uafixResolve(name, year, type, season, episode) : Promise.resolve([]),
-      resolveEnglishCascade({ name, year, tmdb, imdbId: baseId }, type, season, episode),
+      langOn(config, 'uk') && name ? uafixResolve(name, year, type, season, episode) : Promise.resolve([]),
+      langOn(config, 'en') ? resolveEnglishCascade({ name, year, tmdb, imdbId: baseId }, type, season, episode) : Promise.resolve([]),
     ]);
 
     return {
@@ -1332,6 +1354,42 @@ app.options('/proxy', (req, res) => {
 });
 app.get('/proxy', handleProxy);
 
+// Configure page — the Stremio apps open <transport base>/configure when the
+// manifest sets behaviorHints.configurable. The chosen languages are embedded
+// in the install URL as a URL-encoded JSON path segment, which the SDK router
+// hands to the stream handler as args.config. Re-configuring an installed
+// addon lands on /<cfg>/configure, so we prefill from that segment.
+function configurePage(req, res) {
+  let current = {};
+  try { current = JSON.parse(decodeURIComponent(req.params.config || '')) || {}; } catch { /* fresh install */ }
+  const base = reqBaseUrl(req);
+  const box = c => `<label style="display:block;margin:10px 0;font-size:18px;cursor:pointer">` +
+    `<input type="checkbox" name="${c.key}" ${langOn(current, c.key) ? 'checked' : ''} style="width:18px;height:18px;vertical-align:-3px;margin-right:10px">${c.title}</label>`;
+  res.setHeader('content-type', 'text/html; charset=utf-8');
+  res.end(`<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">` +
+    `<title>${manifest.name} — Configure</title>` +
+    `<body style="font-family:system-ui;max-width:640px;margin:40px auto;padding:0 16px;line-height:1.6">` +
+    `<h1>${manifest.name}</h1><p>Pick which audio languages show up in your stream list:</p>` +
+    `<form id="f">${manifest.config.map(box).join('')}</form>` +
+    `<p><a id="install" style="display:inline-block;background:#7b5bf5;color:#fff;padding:12px 28px;border-radius:8px;text-decoration:none;font-weight:600">Install</a></p>` +
+    `<p style="color:#666">Or copy the install URL:<br><code id="url" style="word-break:break-all"></code></p>` +
+    `<script>
+      const f = document.getElementById('f');
+      function update() {
+        const cfg = {};
+        let allOn = true;
+        for (const el of f.elements) { cfg[el.name] = el.checked; if (!el.checked) allOn = false; }
+        const seg = allOn ? '' : '/' + encodeURIComponent(JSON.stringify(cfg));
+        const url = ${JSON.stringify(base)} + seg + '/manifest.json';
+        document.getElementById('url').textContent = url;
+        document.getElementById('install').href = url.replace(/^https?:\\/\\//, 'stremio://');
+      }
+      f.addEventListener('change', update); update();
+    </script></body>`);
+}
+app.get('/configure', configurePage);
+app.get('/:config/configure', configurePage);
+
 // Addon protocol routes (manifest, catalog, meta, stream) — CORS handled by the SDK router.
 app.use(getRouter(builder.getInterface()));
 
@@ -1342,7 +1400,8 @@ app.get('/', (req, res) => {
   res.end(`<!doctype html><meta charset="utf-8"><title>${manifest.name}</title>` +
     `<body style="font-family:system-ui;max-width:640px;margin:40px auto;padding:0 16px;line-height:1.6">` +
     `<h1>${manifest.name}</h1><p>${manifest.description}</p>` +
-    `<p><b>Install URL:</b> <code>${base}/manifest.json</code></p></body>`);
+    `<p><b>Install URL:</b> <code>${base}/manifest.json</code></p>` +
+    `<p><a href="/configure">Configure</a> — choose which audio languages to show.</p></body>`);
 });
 
 app.listen(PORT, () => {

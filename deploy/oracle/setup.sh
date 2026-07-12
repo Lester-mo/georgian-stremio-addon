@@ -57,6 +57,13 @@ echo "==> Installing app dependencies"
 cd "$APP_DIR"
 npm install --omit=dev
 
+# Stable secret for sealing /proxy tokens (AES-256-GCM). Persisted once so it
+# survives re-runs — a changing key would only break in-flight playlists on
+# redeploy, never anything permanent.
+SECRET_FILE=/etc/mercury.secret
+if [ ! -s "$SECRET_FILE" ]; then openssl rand -hex 32 > "$SECRET_FILE"; chmod 600 "$SECRET_FILE"; fi
+PROXY_SECRET="$(cat "$SECRET_FILE")"
+
 echo "==> Writing systemd unit"
 cat > /etc/systemd/system/mercury.service <<EOF
 [Unit]
@@ -72,6 +79,7 @@ RestartSec=3
 Environment=PORT=$PORT
 Environment=PUBLIC_URL=https://$DOMAIN
 Environment=WORKER_PROXY=$WORKER_PROXY
+Environment=PROXY_SECRET=$PROXY_SECRET
 # The addon only proxies streams; keep it from ballooning
 MemoryMax=800M
 

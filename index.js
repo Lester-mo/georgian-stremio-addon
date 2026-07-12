@@ -11,7 +11,7 @@ const path = require('path');
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '3.5.1',
+  version: '3.5.2',
   name: 'Mercury',
   description: 'Dubbed movies & series — 🇬🇪 Georgian · 🇷🇺 Russian · 🇺🇦 Ukrainian · 🇬🇧 English',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
@@ -1304,6 +1304,21 @@ function langOn(config, key) {
   return v === undefined || v === true || v === 'true' || v === 'checked' || v === 'on';
 }
 
+// Drop behaviorHints.proxyHeaders when the URL is already proxied (self /proxy or
+// the Worker). The proxy injects the upstream Referer itself (it rides inside the
+// sealed token), so echoing it back in the stream metadata is redundant AND leaks
+// the source host in plaintext. A raw, unproxied CDN URL would still keep them —
+// but in the server context proxify() always has a base, so URLs are always proxied.
+function sealStreamHeaders(streams) {
+  return streams.map(s => {
+    if (!s || !s.url || !s.behaviorHints || !s.behaviorHints.proxyHeaders) return s;
+    const proxied = s.url.includes('/proxy?d=') || (WORKER_PROXY && s.url.startsWith(WORKER_PROXY));
+    if (!proxied) return s;
+    const { proxyHeaders, ...rest } = s.behaviorHints;
+    return { ...s, behaviorHints: rest };
+  });
+}
+
 builder.defineStreamHandler(async ({ type, id, config }) => {
   try {
     if (type !== 'movie' && type !== 'series') return { streams: [] };
@@ -1336,12 +1351,12 @@ builder.defineStreamHandler(async ({ type, id, config }) => {
     ]);
 
     return {
-      streams: [
+      streams: sealStreamHeaders([
         ...en,                   // 🇬🇧 English (ge.movie → HDRezka original → kkphim)
         ...gemToStremio(ka),     // 🇬🇪 Georgian (ge.movie)
         ...ru,                   // 🇷🇺 Russian (ge.movie → HDRezka)
         ...uafixToStremio(uk),   // 🇺🇦 Ukrainian (UAFlix)
-      ],
+      ]),
     };
   } catch (e) {
     console.error('stream error:', e.message);

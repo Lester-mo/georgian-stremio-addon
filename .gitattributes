@@ -1,0 +1,7 @@
+# These get scp'd straight from a Windows checkout to the Ubuntu VM
+# (see deploy/oracle/README.md). With core.autocrlf=true they would arrive
+# with CRLF and bash would fail on "/usr/bin/env bash^M". Pin them to LF.
+*.sh text eol=lf
+Caddyfile text eol=lf
+*.service text eol=lf
+*.timer text eol=lf

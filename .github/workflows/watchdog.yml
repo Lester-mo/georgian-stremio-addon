@@ -1,0 +1,68 @@
+name: mercury-watchdog
+
+# External auto-heal for the addon. The Oracle box is a 1 GB E2.1.Micro whose
+# Caddy TLS handshake wedges under memory pressure — port 80 stays up but HTTPS
+# (:443) goes dark until a reboot. We have no on-box access (SSH key isn't
+# authorized; the Cloud Agent won't run Run Command), so this probes the public
+# manifest and, only when it's down across several tries, issues a SOFTRESET —
+# exactly the console "Reboot" that clears it. See deploy/oracle for the on-box
+# fix we couldn't install. Needs 6 repo secrets (README below in the PR/setup).
+
+on:
+  schedule:
+    # Every 30 min. Each run bills >=1 GitHub Actions minute; 30 min keeps a
+    # private repo comfortably under the 2000-min/mo free tier (~1440/mo).
+    # Tighten to '*/15' only if you're fine with the extra minutes. Note GitHub
+    # can delay scheduled runs under load, so real detection may lag a little.
+    - cron: '*/30 * * * *'
+  workflow_dispatch:
+    inputs:
+      force_reboot:
+        description: 'Reboot even if HTTPS is up (one-time test that the OCI creds work)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: mercury-watchdog
+  cancel-in-progress: false
+
+permissions: {}   # needs no repo token; auth is via OCI secrets only
+
+jobs:
+  probe-and-heal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - name: Probe public HTTPS (3 tries, 20s apart)
+        id: probe
+        run: |
+          set -u
+          url="https://mercury-source.duckdns.org/manifest.json"
+          healthy=0
+          for i in 1 2 3; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 "$url" || echo 000)
+            if [ "$code" = "200" ]; then healthy=1; echo "try $i: HTTP 200 — up"; break; fi
+            echo "try $i: HTTP $code — not healthy"
+            [ "$i" -lt 3 ] && sleep 20
+          done
+          echo "healthy=$healthy" >> "$GITHUB_OUTPUT"
+
+      - name: Healthy — nothing to do
+        if: steps.probe.outputs.healthy == '1' && github.event.inputs.force_reboot != 'true'
+        run: echo "Addon HTTPS is up. No action."
+
+      - name: Reboot the OCI instance (down, or forced test)
+        if: steps.probe.outputs.healthy == '0' || github.event.inputs.force_reboot == 'true'
+        uses: oracle-actions/run-oci-cli-command@v1.3.2
+        env:
+          OCI_CLI_USER: ${{ secrets.OCI_CLI_USER }}
+          OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
+          OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
+          OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+          OCI_CLI_REGION: ${{ secrets.OCI_CLI_REGION }}
+        with:
+          command: 'compute instance action --instance-id ${{ secrets.OCI_INSTANCE_OCID }} --action SOFTRESET'
+
+      - name: Note reboot
+        if: steps.probe.outputs.healthy == '0' || github.event.inputs.force_reboot == 'true'
+        run: echo "Issued SOFTRESET — the instance should be back in a few minutes."

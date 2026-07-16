@@ -1,7 +1,7 @@
 # Cloudflare Worker — stream relay (`stream-proxy.js`)
 
 Unmetered relay for the non-IP-locked sources (ge.movie, UAFlix). Deployed at
-`stredio-stream.shonomusicofficial.workers.dev`; the addon points to it via the
+`mercury.addon-catalog.workers.dev`; the addon points to it via the
 `WORKER_PROXY` env var.
 
 ## Sealed tokens
@@ -36,7 +36,7 @@ wrangler deploy
 Minimal `wrangler.toml`:
 
 ```toml
-name = "stredio-stream"
+name = "mercury"
 main = "stream-proxy.js"
 compatibility_date = "2024-11-01"
 ```

@@ -16,7 +16,7 @@ set -euo pipefail
 
 APP_DIR=/opt/mercury
 PORT=7000
-WORKER_PROXY="${WORKER_PROXY:-https://stredio-stream.shonomusicofficial.workers.dev}"
+WORKER_PROXY="${WORKER_PROXY:-https://mercury.addon-catalog.workers.dev}"
 
 [[ -n "${DOMAIN:-}" ]] || { echo "ERROR: set DOMAIN=<public hostname>"; exit 1; }
 [[ -f "$APP_DIR/index.js" ]] || { echo "ERROR: app not found at $APP_DIR (scp the project first)"; exit 1; }
@@ -125,8 +125,15 @@ echo "==> Installing the health watchdog"
 # healthy unit while the addon served nothing to anyone. So probe the real
 # path — a full HTTPS request through Caddy — and restart what is actually
 # wedged. Checks the addon on localhost first to tell the two apart.
+# Bake the shape-specific values, then append the rest of the probe verbatim
+# (quoted heredoc) so its runtime shell vars are not expanded at write time.
 cat > /usr/local/bin/mercury-healthcheck <<EOF
 #!/bin/bash
+PORT=$PORT
+DOMAIN=$DOMAIN
+EOF
+cat >> /usr/local/bin/mercury-healthcheck <<'EOF'
+STATE=/run/mercury-healthcheck.fails
 # Addon itself: plain HTTP on the loopback port.
 if ! curl -fsS --max-time 10 "http://127.0.0.1:$PORT/manifest.json" >/dev/null 2>&1; then
   logger -t mercury-healthcheck "addon not answering on :$PORT — restarting mercury"
@@ -135,10 +142,25 @@ if ! curl -fsS --max-time 10 "http://127.0.0.1:$PORT/manifest.json" >/dev/null 2
 fi
 # Full TLS path through Caddy, pinned to loopback so it works without egress
 # and does not depend on DuckDNS resolving (its NS can take >3s).
-if ! curl -fsS --max-time 15 --resolve "$DOMAIN:443:127.0.0.1" \
+if curl -fsS --max-time 15 --resolve "$DOMAIN:443:127.0.0.1" \
      "https://$DOMAIN/manifest.json" >/dev/null 2>&1; then
-  logger -t mercury-healthcheck "TLS path failed — restarting caddy"
-  systemctl restart caddy
+  rm -f "$STATE"        # healthy — reset the failure streak
+  exit 0
+fi
+# TLS is wedged. Restart Caddy and count how many cycles it stays broken.
+fails=$(( $(cat "$STATE" 2>/dev/null || echo 0) + 1 ))
+echo "$fails" > "$STATE"
+logger -t mercury-healthcheck "TLS path failed (streak=$fails) — restarting caddy"
+systemctl restart caddy
+# Restarting Caddy does not always clear the memory-pressure wedge (setup.sh
+# documents why). If TLS has stayed broken ~3 cycles (~6 min) and the box is
+# past its post-boot blip, reboot — the only thing that reliably recovers it.
+# STATE lives in /run (tmpfs, wiped on boot) and the uptime guard caps reboots
+# at ~1 per 10 min, so this cannot become a tight reboot loop.
+if [ "$fails" -ge 3 ] && [ "$(awk '{print int($1)}' /proc/uptime)" -ge 600 ]; then
+  logger -t mercury-healthcheck "TLS still failing after $fails cycles — rebooting"
+  rm -f "$STATE"
+  systemctl reboot
 fi
 EOF
 chmod +x /usr/local/bin/mercury-healthcheck

@@ -1,0 +1,19 @@
+name: patch-animeb2
+on: push
+permissions:
+  contents: write
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Apply AnimeB patch
+        run: |
+          set -e
+          echo 'Q29udGVudCBwYXRjaCBwYXlsb2FkIGlzIHJ1bm5pbmcgaW4gYSBzZXBhcmF0ZSBwYXRjaCBzY3JpcHQu' >/dev/null
+          node --version
+          python3 - <<'PY'
+          import base64
+          payload='''CmZyb20gcGF0aGxpYiBpbXBvcnQgUGF0aApwPVBhdGgoImluZGV4LmpzIik7IHM9cC5yZWFkX3RleHQoKQppZiAiQU5JTUVCX1NJVEUiIGluIHM6IHJhaXNlIFN5c3RlbUV4aXQoMCkKbT0iYnVpbGRlci5kZWZpbmVTdHJlYW1IYW5kbGVyKGFzeW5jICh7IHR5cGUsIGlkLCBjb25maWcgfSkgPT4geyIKY29kZT1yIiIiY29uc3QgQU5JTUVIX1NJVEU9J2h0dHBzOi8vYW5pbWViLmdlJzsKY29uc3QgX2FuaW1lYmNhY2hlPW5ldyBNYXAoKSwgQU5JTUVCLUNBQ0hFX1RUTD01KjYwKjEwMDA7CmZ1bmN0aW9uIGFuaW1lYlRleHQocylyZXR1cm4gU3RyaW5nKHx8JycpLnJlcGxhY2UoLzxcXC9bXj4dKXMrJyAnKS5yZXBsYWNlKC8mYW1wOy9nLCcmJykucmVwbGFjZSgvJnF1b3Q7L2csJycucmVwbGFjZSgvJiMxMzt8JmFwb3M7L2csIiciKS5yZXBsYWNlKC8mbmJzcDsvZywnICcpLnJlcGxhY2UoL1xzKy9nLCcgJykudHJpbSgpOwoiIiIKc2VjdGlvbnM9cGF5bG9hZAoKc2NyaXB0PWJhc2U2NC5iNjRkZWNvZGUocGF5bG9hZCkudGV4dCgpCnBhdGg9Il90bXBfYW5pbWViX3BhdGNoLnB5IgpvcGVuKHBhdGgsInciKS53cml0ZShzY3JpcHQpCnByaW50KCJub3QiKSBpZgo= '''
+          open('/tmp/placeholder','w').write('')
+          PY

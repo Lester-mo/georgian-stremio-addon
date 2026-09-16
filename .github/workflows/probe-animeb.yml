@@ -9,23 +9,15 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Probe AnimeB player page
+      - name: Probe AnimeB player page and addon structure
         shell: bash
         run: |
           set -euxo pipefail
           curl -L --retry 2 -A 'Mozilla/5.0' 'https://animeb.ge/anime/334-gurren-lagann.html' -o /tmp/animeb.html
-          echo '--- player/iframe/video/api lines ---'
-          grep -Ein 'iframe|video|player|m3u8|mp4|api\.|episode|fplayer|source' /tmp/animeb.html | head -n 200 || true
-          echo '--- script srcs ---'
-          grep -Eo '<script[^>]+src=["'"'][^"'"']+["'"']' /tmp/animeb.html | head -n 100 || true
-          echo '--- inline snippets around player ---'
-          python3 - <<'PY'
-          from pathlib import Path
-          s=Path('/tmp/animeb.html').read_text(errors='ignore')
-          low=s.lower()
-          for needle in ('iframe','m3u8','player','video','episode','api.'):
-              i=low.find(needle)
-              if i>=0:
-                  print('\n###', needle, '###')
-                  print(s[max(0,i-1000):i+2500])
-          PY
+          echo '--- AnimeB player playlist lines ---'
+          grep -Ein 'playlist:|sourceType:|video\.sibnet|filemoon|csst\.online|m3u8|mp4' /tmp/animeb.html | head -n 250 || true
+          echo '--- index.js relevant structure ---'
+          curl -L --retry 2 -A 'Mozilla/5.0' 'https://raw.githubusercontent.com/Lester-mo/georgian-stremio-addon/main/index.js' -o /tmp/index.js
+          grep -nE 'function .*ToStremio|function .*Resolve|ANILIBERTY|streamHandler|defineStreamHandler|\.stream\(|Promise\.all|config\.ka|args\.config' /tmp/index.js | head -n 250 || true
+          echo '--- functions near stream handler ---'
+          grep -nE 'builder\.defineStreamHandler|defineStreamHandler' /tmp/index.js | while IFS=: read -r n _; do start=$((n-30)); end=$((n+100)); sed -n "${start},${end}p" /tmp/index.js; done

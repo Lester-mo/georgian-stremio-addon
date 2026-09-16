@@ -9,15 +9,35 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: Probe AnimeB player page and addon structure
+      - name: Probe AnimeB search and player sources
         shell: bash
         run: |
           set -euxo pipefail
-          curl -L --retry 2 -A 'Mozilla/5.0' 'https://animeb.ge/anime/334-gurren-lagann.html' -o /tmp/animeb.html
-          echo '--- AnimeB player playlist lines ---'
-          grep -Ein 'playlist:|sourceType:|video\.sibnet|filemoon|csst\.online|m3u8|mp4' /tmp/animeb.html | head -n 250 || true
-          echo '--- index.js relevant structure ---'
-          curl -L --retry 2 -A 'Mozilla/5.0' 'https://raw.githubusercontent.com/Lester-mo/georgian-stremio-addon/main/index.js' -o /tmp/index.js
-          grep -nE 'function .*ToStremio|function .*Resolve|ANILIBERTY|streamHandler|defineStreamHandler|\.stream\(|Promise\.all|config\.ka|args\.config' /tmp/index.js | head -n 250 || true
-          echo '--- functions near stream handler ---'
-          grep -nE 'builder\.defineStreamHandler|defineStreamHandler' /tmp/index.js | while IFS=: read -r n _; do start=$((n-30)); end=$((n+100)); sed -n "${start},${end}p" /tmp/index.js; done
+          UA='Mozilla/5.0'
+          echo '--- DLE search ---'
+          curl -L --retry 2 -A "$UA" 'https://animeb.ge/index.php?do=search&subaction=search&story=Gurren%20Lagann' -o /tmp/search.html || true
+          grep -Ein '/anime/|Gurren|Lagann' /tmp/search.html | head -n 80 || true
+          echo '--- AnimeB player playlist ---'
+          curl -L --retry 2 -A "$UA" 'https://animeb.ge/anime/334-gurren-lagann.html' -o /tmp/animeb.html
+          python3 - <<'PY'
+          import re
+          from pathlib import Path
+          s=Path('/tmp/animeb.html').read_text(errors='ignore')
+          urls=re.findall(r"['\"](https?://[^'\"]+)['\"]", s)
+          seen=[]
+          for u in urls:
+              if any(x in u for x in ('video.sibnet.ru','filemoon.','csst.online')) and u not in seen:
+                  seen.append(u)
+          print('\n'.join(seen[:30]))
+          PY
+          echo '--- fetch representative embeds ---'
+          for u in \
+            'https://video.sibnet.ru/shell.php?videoid=5677309' \
+            'https://filemoon.sx/e/h55neq4q2kcn' \
+            'https://csst.online/embed/695634/'; do
+            name=$(echo "$u" | sed 's#[^A-Za-z0-9]#_#g')
+            echo "### $u ###"
+            curl -L --retry 2 -A "$UA" -e 'https://animeb.ge/' "$u" -o "/tmp/$name.html" || true
+            wc -c "/tmp/$name.html" || true
+            grep -Ein 'm3u8|\.mp4|source|file:|sources:|jwplayer|playlist|video' "/tmp/$name.html" | head -n 100 || true
+          done

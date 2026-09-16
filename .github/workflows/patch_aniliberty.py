@@ -1,0 +1,141 @@
+from pathlib import Path
+
+p = Path('index.js')
+s = p.read_text()
+
+if 'const ANILIBERTY_API =' not in s:
+    marker = 'builder.defineStreamHandler(async ({ type, id, config }) => {'
+    if marker not in s:
+        raise SystemExit('stream handler marker not found')
+
+    block = r'''// ─────────────────────────────────────────
+//  ANILIBERTY / ANILIBRIA — Russian-dubbed anime
+//  AniLiberty currently serves its public API from anilibria.top.
+// ─────────────────────────────────────────
+const ANILIBERTY_API = 'https://anilibria.top/api/v1';
+const ANILIBERTY_SITE = 'https://anilibria.top';
+const _aniCache = new Map();
+const _aniTtl = 5 * 60 * 1000;
+
+function aniNorm(v) {
+  return String(v || '').toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^a-z0-9а-я0-9]+/gi, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function aniReleaseText(r) {
+  const n = r && r.name || {};
+  return [n.main, n.english, n.alternative, r.alias, r.title].filter(Boolean).join(' ');
+}
+
+function aniEpisodeNumber(e) {
+  const n = e && (e.ordinal ?? e.number ?? e.episode ?? e.episode_number ?? e.sort_order);
+  const x = Number(n);
+  return Number.isFinite(x) ? x : null;
+}
+
+function aniCollectEpisodes(value, out = []) {
+  if (!value || typeof value !== 'object') return out;
+  if (Array.isArray(value)) {
+    for (const x of value) aniCollectEpisodes(x, out);
+    return out;
+  }
+  if (value.hls_1080 || value.hls_720 || value.hls_480) out.push(value);
+  for (const k of ['episodes', 'episode', 'items', 'data', 'release']) {
+    if (value[k]) aniCollectEpisodes(value[k], out);
+  }
+  return out;
+}
+
+async function aniJson(url) {
+  const r = await fetch(url, {
+    headers: { 'User-Agent': UA, Accept: 'application/json', Referer: ANILIBERTY_SITE + '/' },
+    timeout: 10000,
+  });
+  if (!r.ok) throw new Error('AniLiberty HTTP ' + r.status);
+  return r.json();
+}
+
+async function aniResolve(name, year, type, episode) {
+  if (!name) return [];
+  const ck = `${type}|${episode}|${aniNorm(name)}|${year || ''}`;
+  const hit = _aniCache.get(ck);
+  if (hit && Date.now() - hit.at < _aniTtl) return hit.value;
+
+  try {
+    const q = await aniJson(`${ANILIBERTY_API}/app/search/releases?query=${encodeURIComponent(name)}`);
+    const candidates = Array.isArray(q) ? q : (q && Array.isArray(q.data) ? q.data : []);
+    const target = aniNorm(name);
+    const ranked = candidates.map(r => {
+      const text = aniNorm(aniReleaseText(r));
+      const exact = text.includes(target) ? 2 : 0;
+      const y = year && Number(r.year || (r.release && r.release.year)) === Number(year) ? 2 : 0;
+      return { r, score: exact + y };
+    }).sort((a, b) => b.score - a.score);
+    if (!ranked.length) return [];
+
+    const picked = ranked[0].r;
+    const alias = picked.alias || (picked.name && picked.name.alias);
+    const rid = picked.id;
+    if (!alias && !rid) return [];
+
+    const detail = await aniJson(`${ANILIBERTY_API}/anime/releases/${encodeURIComponent(alias || rid)}`);
+    const episodes = aniCollectEpisodes(detail);
+    if (!episodes.length) return [];
+
+    let ep = episodes.find(e => aniEpisodeNumber(e) === Number(episode));
+    if (!ep) ep = episodes[0];
+    const url = ep.hls_1080 || ep.hls_720 || ep.hls_480;
+    if (!url) return [];
+
+    const quality = ep.hls_1080 ? '1080p' : ep.hls_720 ? '720p' : '480p';
+    const result = [{ url, quality, episode: aniEpisodeNumber(ep) || episode }];
+    _aniCache.set(ck, { at: Date.now(), value: result });
+    return result;
+  } catch (e) {
+    console.warn('AniLiberty resolve failed:', e.message);
+    _aniCache.set(ck, { at: Date.now(), value: [] });
+    return [];
+  }
+}
+
+function aniToStremio(items) {
+  return items.map(r => ({
+    url: proxify(r.url, ANILIBERTY_SITE + '/', true, 'ru'),
+    name: `AniLiberty • Русская озвучка • ${r.quality}`,
+    description: 'AniLiberty / AniLibria — Russian dub',
+    behaviorHints: {
+      notWebReady: true,
+      streamType: 'hls',
+      lang: 'ru',
+      audioLang: 'ru',
+      proxyHeaders: { request: { Referer: ANILIBERTY_SITE + '/', 'User-Agent': UA } },
+    },
+  }));
+}
+
+'''
+    s = s.replace(marker, block + marker, 1)
+
+old = 'const [ka, ru, uk, en] = await Promise.all(['
+new = 'const [ka, ru, uk, en, ani] = await Promise.all(['
+if old not in s:
+    raise SystemExit('promise declaration not found')
+s = s.replace(old, new, 1)
+
+anchor = "      langOn(config, 'en') ? resolveEnglishCascade({ name, year, tmdb, imdbId: baseId }, type, season, episode) : Promise.resolve([]),"
+replacement = anchor + "\n      langOn(config, 'ru') && name ? aniResolve(name, year, type, episode) : Promise.resolve([]),"
+if anchor not in s:
+    raise SystemExit('language resolver anchor not found')
+s = s.replace(anchor, replacement, 1)
+
+output_old = "        ...ru,                   // 🇷🇺 Russian (ge.movie → HDRezka)\n        ...uafixToStremio(uk),   // 🇺🇦 Ukrainian (UAFlix)"
+output_new = "        ...ru,                   // 🇷🇺 Russian (ge.movie → HDRezka)\n        ...aniToStremio(ani),    // 🇷🇺 Russian (AniLiberty)\n        ...uafixToStremio(uk),   // 🇺🇦 Ukrainian (UAFlix)"
+if output_old not in s:
+    raise SystemExit('stream output anchor not found')
+s = s.replace(output_old, output_new, 1)
+
+s = s.replace("version: '3.5.2'", "version: '3.6.0'", 1)
+p.write_text(s)

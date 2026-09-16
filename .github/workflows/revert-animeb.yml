@@ -1,0 +1,24 @@
+name: Revert AnimeB integration
+on: push
+permissions:
+  contents: write
+jobs:
+  revert:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Revert AnimeB commit
+        run: |
+          set -e
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          if git cat-file -e 4ed8a7a1bad3651526a97a3b36ce28e84674b46d^{commit}; then
+            git revert --no-edit 4ed8a7a1bad3651526a97a3b36ce28e84674b46d
+          fi
+          rm -f .github/workflows/revert-animeb.yml
+          git add -A .github/workflows
+          git commit -m 'Remove temporary revert workflow' || true
+          git push

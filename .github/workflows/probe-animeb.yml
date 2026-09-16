@@ -5,39 +5,58 @@ on:
       - '.github/workflows/probe-animeb.yml'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  probe:
+  patch:
     runs-on: ubuntu-latest
     steps:
-      - name: Probe AnimeB search and player sources
+      - uses: actions/checkout@v4
+      - name: Patch AnimeB source
         shell: bash
         run: |
-          set -euxo pipefail
-          UA='Mozilla/5.0'
-          echo '--- DLE search ---'
-          curl -L --retry 2 -A "$UA" 'https://animeb.ge/index.php?do=search&subaction=search&story=Gurren%20Lagann' -o /tmp/search.html || true
-          grep -Ein '/anime/|Gurren|Lagann' /tmp/search.html | head -n 80 || true
-          echo '--- AnimeB player playlist ---'
-          curl -L --retry 2 -A "$UA" 'https://animeb.ge/anime/334-gurren-lagann.html' -o /tmp/animeb.html
+          set -euo pipefail
           python3 - <<'PY'
-          import re
           from pathlib import Path
-          s=Path('/tmp/animeb.html').read_text(errors='ignore')
-          urls=re.findall(r"['\"](https?://[^'\"]+)['\"]", s)
-          seen=[]
-          for u in urls:
-              if any(x in u for x in ('video.sibnet.ru','filemoon.','csst.online')) and u not in seen:
-                  seen.append(u)
-          print('\n'.join(seen[:30]))
+          p=Path('index.js')
+          s=p.read_text()
+          if 'ANIMEB_SITE' in s:
+              print('AnimeB already patched')
+              raise SystemExit(0)
+          marker="builder.defineStreamHandler(async ({ type, id, config }) => {"
+          code=r'''const ANIMEB_SITE='https://animeb.ge';
+          const _animebCache=new Map();
+          const ANIMEB_CACHE_TTL=5*60*1000;
+          function animebText(s){return String(s||'').replace(/<[^>]+>/g,' ').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;|&apos;/g,"'").replace(/&nbsp;/g,' ').replace(/\s+/g,' ').trim();}
+          function animebNorm(s){return animebText(s).toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9\u10a0-\u10ff]+/g,' ').trim();}
+          async function animebHtml(url){const r=await fetch(url,{headers:{'User-Agent':UA,Accept:'text/html,application/xhtml+xml',Referer:ANIMEB_SITE+'/'},timeout:10000,redirect:'follow'});if(!r.ok)throw new Error(`AnimeB HTTP ${r.status}`);return r.text();}
+          function animebCandidates(html,q){const out=[],seen=new Set(),nq=animebNorm(q),tok=nq.split(' ').filter(x=>x.length>1),re=/href=["'](\/anime\/[^"'#?]+\.html)["'][^>]*>([\s\S]*?)<\/a>/gi;let m;while((m=re.exec(html))){if(seen.has(m[1]))continue;seen.add(m[1]);const title=animebText(m[2]);if(!title)continue;const n=animebNorm(title+' '+m[1]);let score=n.includes(nq)?100:0;for(const t of tok)if(n.includes(t))score+=8;out.push({href:new URL(m[1],ANIMEB_SITE).toString(),title,score});}return out.sort((a,b)=>b.score-a.score).slice(0,12);}
+          function animebEpisodeUrls(html,ep){const wanted=Number(ep)||1,found=new Set(),re=/["']title["']\s*:\s*["']სერია\s*(\d+)["'][^}]*["']url["']\s*:\s*["']([^"']+)["']/gi;let m;while((m=re.exec(html))){if(Number(m[1])===wanted&&/^https?:\/\//i.test(m[2]))found.add(m[2]);}return [...found];}
+          async function animebResolve(name,year,type,season,episode){if(!name||type!=='series')return[];const ck=`${animebNorm(name)}|${year||''}|${season||1}|${episode||1}`,hit=_animebCache.get(ck);if(hit&&Date.now()-hit.at<ANIMEB_CACHE_TTL)return hit.value;try{const searches=[`${ANIMEB_SITE}/index.php?do=search&subaction=search&story=${encodeURIComponent(name)}`,`${ANIMEB_SITE}/?do=search&subaction=search&story=${encodeURIComponent(name)}`],cand=[],seen=new Set();for(const u of searches){try{const h=await animebHtml(u);for(const c of animebCandidates(h,name))if(!seen.has(c.href)){seen.add(c.href);cand.push(c);}}catch{}if(cand.length)break;}cand.sort((a,b)=>b.score-a.score);const q=animebNorm(name),res=[];for(const c of cand.slice(0,6)){let h;try{h=await animebHtml(c.href);}catch{continue;}if(!(animebNorm(c.title).includes(q)||animebNorm(h).includes(q)))continue;const urls=animebEpisodeUrls(h,episode);if(!urls.length)continue;res.push(...urls.slice(0,4));if(!year||h.includes(`წელი ${year}`)||h.includes(`>${year}<`))break;}const value=[...new Set(res)].map((url,i)=>({externalUrl:url,name:`AnimeB • ქართული • Player ${i+1}`,description:`AnimeB Georgian dub • Episode ${episode}`,behaviorHints:{notWebReady:true,bingeGroup:'animeb-ka'}}));_animebCache.set(ck,{at:Date.now(),value});return value;}catch(e){console.warn('AnimeB resolve failed:',e.message);_animebCache.set(ck,{at:Date.now(),value:[]});return[];}}
+          '''
+          s=s.replace(marker,code+'\n'+marker,1)
+          s=s.replace("version: '3.6.0'","version: '3.7.0'",1)
+          s=s.replace("const [ka, ru, uk, en, ani] = await Promise.all([","const [ka, animeb, ru, uk, en, ani] = await Promise.all([",1)
+          ka="      langOn(config, 'ka') && tmdb ? (type === 'series' ? gemEpisode(tmdb, season, episode) : gemMovie(tmdb)) : Promise.resolve([]),"
+          if ka not in s: raise SystemExit('KA resolver marker not found')
+          s=s.replace(ka,ka+"\n      langOn(config, 'ka') && name ? animebResolve(name, year, type, season, episode) : Promise.resolve([]),",1)
+          out="        ...gemToStremio(ka),     // 🇬🇪 Georgian (ge.movie)"
+          if out not in s: raise SystemExit('KA output marker not found')
+          s=s.replace(out,out+"\n        ...animeb,                // 🇬🇪 Georgian (AnimeB)",1)
+          p.write_text(s)
           PY
-          echo '--- fetch representative embeds ---'
-          for u in \
-            'https://video.sibnet.ru/shell.php?videoid=5677309' \
-            'https://filemoon.sx/e/h55neq4q2kcn' \
-            'https://csst.online/embed/695634/'; do
-            name=$(echo "$u" | sed 's#[^A-Za-z0-9]#_#g')
-            echo "### $u ###"
-            curl -L --retry 2 -A "$UA" -e 'https://animeb.ge/' "$u" -o "/tmp/$name.html" || true
-            wc -c "/tmp/$name.html" || true
-            grep -Ein 'm3u8|\.mp4|source|file:|sources:|jwplayer|playlist|video' "/tmp/$name.html" | head -n 100 || true
-          done
+          node --check index.js
+          git diff --check
+          git add index.js
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Add AnimeB Georgian anime source'
+          git push
+      - name: Cleanup temporary files
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f .github/workflows/probe-animeb.yml .github/workflows/add-animeb.yml
+          rm -f scripts/add_animeb.py
+          git add -A
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Remove temporary AnimeB integration files' || true
+          git push || true

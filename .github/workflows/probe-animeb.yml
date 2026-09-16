@@ -1,4 +1,4 @@
-name: probe-animeb
+name: patch-animeb
 on:
   push:
     paths:

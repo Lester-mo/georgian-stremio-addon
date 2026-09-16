@@ -1,0 +1,28 @@
+name: probe-animeb
+on:
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe AnimeB player page
+        shell: bash
+        run: |
+          set -euxo pipefail
+          curl -L --retry 2 -A 'Mozilla/5.0' 'https://animeb.ge/anime/334-gurren-lagann.html' -o /tmp/animeb.html
+          echo '--- player/iframe/video/api lines ---'
+          grep -Ein 'iframe|video|player|m3u8|mp4|api\.|episode|fplayer|source' /tmp/animeb.html | head -n 200 || true
+          echo '--- script srcs ---'
+          grep -Eo '<script[^>]+src=["'"'][^"'"']+["'"']' /tmp/animeb.html | head -n 100 || true
+          echo '--- inline snippets around player ---'
+          python3 - <<'PY'
+          from pathlib import Path
+          s=Path('/tmp/animeb.html').read_text(errors='ignore')
+          low=s.lower()
+          for needle in ('iframe','m3u8','player','video','episode','api.'):
+              i=low.find(needle)
+              if i>=0:
+                  print('\n###', needle, '###')
+                  print(s[max(0,i-1000):i+2500])
+          PY

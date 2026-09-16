@@ -142,3 +142,5 @@ Render was abandoned: its free bandwidth quota can't carry proxied video.
 - Filters for Georgian language (`ka`) audio
 - Falls back to GEMovie via HTML scraping if Adjaranet has no result
 - IMDB ID matching lets Georgian audio appear on standard Stremio content pages
+
+<!-- trigger -->

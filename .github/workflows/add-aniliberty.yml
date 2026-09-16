@@ -1,0 +1,33 @@
+name: add-aniliberty
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  patch:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Patch index.js
+        run: |
+          echo 'Q' | base64 -d > /tmp/patch.py
+          python3 /tmp/patch.py
+      - name: Validate
+        run: node --check index.js
+      - name: Commit changes
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index.js
+          git diff --cached --quiet && exit 0
+          git commit -m 'Add AniLiberty Russian anime source'
+          git push
+      - name: Remove temporary patch workflow
+        if: success()
+        run: |
+          git rm .github/workflows/add-aniliberty.yml || true
+          git commit -m 'Remove temporary AniLiberty patch workflow' || true
+          git push || true

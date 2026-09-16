@@ -11,7 +11,7 @@ const path = require('path');
 // ─────────────────────────────────────────
 const manifest = {
   id: 'community.georgian.dubbed',
-  version: '3.6.0',
+  version: '3.7.0',
   name: 'Mercury',
   description: 'Dubbed movies & series — 🇬🇪 Georgian · 🇷🇺 Russian · 🇺🇦 Ukrainian · 🇬🇧 English',
   logo: 'https://upload.wikimedia.org/wikipedia/commons/thumb/0/0f/Flag_of_Georgia.svg/200px-Flag_of_Georgia.svg.png',
@@ -1427,6 +1427,16 @@ function aniToStremio(items) {
   }));
 }
 
+const ANIMEB_SITE='https://animeb.ge';
+const _animebCache=new Map();
+const ANIMEB_CACHE_TTL=5*60*1000;
+function animebText(s){return String(s||'').replace(/<[^>]+>/g,' ').replace(/&amp;/g,'&').replace(/&quot;/g,'"').replace(/&#39;|&apos;/g,"'").replace(/&nbsp;/g,' ').replace(/\s+/g,' ').trim();}
+function animebNorm(s){return animebText(s).toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9\u10a0-\u10ff]+/g,' ').trim();}
+async function animebHtml(url){const r=await fetch(url,{headers:{'User-Agent':UA,Accept:'text/html,application/xhtml+xml',Referer:ANIMEB_SITE+'/'},timeout:10000,redirect:'follow'});if(!r.ok)throw new Error(`AnimeB HTTP ${r.status}`);return r.text();}
+function animebCandidates(html,q){const out=[],seen=new Set(),nq=animebNorm(q),tok=nq.split(' ').filter(x=>x.length>1),re=/href=["'](\/anime\/[^"'#?]+\.html)["'][^>]*>([\s\S]*?)<\/a>/gi;let m;while((m=re.exec(html))){if(seen.has(m[1]))continue;seen.add(m[1]);const title=animebText(m[2]);if(!title)continue;const n=animebNorm(title+' '+m[1]);let score=n.includes(nq)?100:0;for(const t of tok)if(n.includes(t))score+=8;out.push({href:new URL(m[1],ANIMEB_SITE).toString(),title,score});}return out.sort((a,b)=>b.score-a.score).slice(0,12);}
+function animebEpisodeUrls(html,ep){const wanted=Number(ep)||1,found=new Set(),re=/["']title["']\s*:\s*["']სერია\s*(\d+)["'][^}]*["']url["']\s*:\s*["']([^"']+)["']/gi;let m;while((m=re.exec(html))){if(Number(m[1])===wanted&&/^https?:\/\//i.test(m[2]))found.add(m[2]);}return [...found];}
+async function animebResolve(name,year,type,season,episode){if(!name||type!=='series')return[];const ck=`${animebNorm(name)}|${year||''}|${season||1}|${episode||1}`,hit=_animebCache.get(ck);if(hit&&Date.now()-hit.at<ANIMEB_CACHE_TTL)return hit.value;try{const searches=[`${ANIMEB_SITE}/index.php?do=search&subaction=search&story=${encodeURIComponent(name)}`,`${ANIMEB_SITE}/?do=search&subaction=search&story=${encodeURIComponent(name)}`],cand=[],seen=new Set();for(const u of searches){try{const h=await animebHtml(u);for(const c of animebCandidates(h,name))if(!seen.has(c.href)){seen.add(c.href);cand.push(c);}}catch{}if(cand.length)break;}cand.sort((a,b)=>b.score-a.score);const q=animebNorm(name),res=[];for(const c of cand.slice(0,6)){let h;try{h=await animebHtml(c.href);}catch{continue;}if(!(animebNorm(c.title).includes(q)||animebNorm(h).includes(q)))continue;const urls=animebEpisodeUrls(h,episode);if(!urls.length)continue;res.push(...urls.slice(0,4));if(!year||h.includes(`წელი ${year}`)||h.includes(`>${year}<`))break;}const value=[...new Set(res)].map((url,i)=>({externalUrl:url,name:`AnimeB • ქართული • Player ${i+1}`,description:`AnimeB Georgian dub • Episode ${episode}`,behaviorHints:{notWebReady:true,bingeGroup:'animeb-ka'}}));_animebCache.set(ck,{at:Date.now(),value});return value;}catch(e){console.warn('AnimeB resolve failed:',e.message);_animebCache.set(ck,{at:Date.now(),value:[]});return[];}}
+
 builder.defineStreamHandler(async ({ type, id, config }) => {
   try {
     if (type !== 'movie' && type !== 'series') return { streams: [] };
@@ -1444,8 +1454,9 @@ builder.defineStreamHandler(async ({ type, id, config }) => {
 
     // Disabled languages are skipped entirely (no upstream fetches), not just
     // filtered out of the response.
-    const [ka, ru, uk, en, ani] = await Promise.all([
+    const [ka, animeb, ru, uk, en, ani] = await Promise.all([
       langOn(config, 'ka') && tmdb ? (type === 'series' ? gemEpisode(tmdb, season, episode) : gemMovie(tmdb)) : Promise.resolve([]),
+      langOn(config, 'ka') && name ? animebResolve(name, year, type, season, episode) : Promise.resolve([]),
       // Russian: ge.movie's track (Worker) first; HDRezka dub as the fallback.
       (async () => {
         if (!langOn(config, 'ru')) return [];
@@ -1463,6 +1474,7 @@ builder.defineStreamHandler(async ({ type, id, config }) => {
       streams: sealStreamHeaders([
         ...en,                   // 🇬🇧 English (ge.movie → HDRezka original → kkphim)
         ...gemToStremio(ka),     // 🇬🇪 Georgian (ge.movie)
+        ...animeb,                // 🇬🇪 Georgian (AnimeB)
         ...ru,                   // 🇷🇺 Russian (ge.movie → HDRezka)
         ...aniToStremio(ani),    // 🇷🇺 Russian (AniLiberty)
         ...uafixToStremio(uk),   // 🇺🇦 Ukrainian (UAFlix)

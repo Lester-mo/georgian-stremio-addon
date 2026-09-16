@@ -12,9 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Patch index.js
-        run: |
-          echo 'ZnJvbSBwYXRobGliIGltcG9ydCBQYXRoCgpwID0gUGF0aCgiaW5kZXguanMiKQpzID0gcC5yZWFkX3RleHQoKQoKaWYgImNvbnN0IEFOSUxJQkVSVFlfQVBJID0iIG5vdCBpbiBzOgogICAgbWFya2VyID0gImJ1aWxkZXIuZGVmaW5lU3RyZWFtSGFuZGxlcihhc3luYyAoeyB0eXBlLCBpZCwgY29uZmlnIH0pID0+IHsiCiAgICBpZiBtYXJrZXIgbm90IGluIHM6CiAgICAgICAgcmFpc2UgU3lzdGVtRXhpdCgic3RyZWFtIGhhbmRsZXIgbWFya2VyIG5vdCBmb3VuZCIpCgogICAgYmxvY2sgPSByJycnLy8g4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSACi8vICBBTklMSUJFUlRZIC8gQU5JTElCUklBIOKAlCBSdXNzaWFuLWR1YmJlZCBhbmltZQovLyAgQW5pTGliZXJ0eSBjdXJyZW50bHkgc2VydmVzIGl0cyBwdWJsaWMgQVBJIGZyb20gYW5pbGlicmlhLnRvcC4KLy8g4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSA4pSACmNvbnN0IEFOSUxJQkVSVFlfQVBJID0gJ2h0dHBzOi8vYW5pbGlicmlhLnRvcC9hcGkvdjEnOwpjb25zdCBBTklMSUJFUlRZX1NJVEUgPSAnaHR0cHM6Ly9hbmlsaWJyaWEudG9wJzsKY29uc3QgX2FuaUNhY2hlID0gbmV3IE1hcCgpOwpjb25zdCBfYW5pVHRsID0gNSAqIDYwICogMTAwMDsKCmZ1bmN0aW9uIGFuaU5vcm0odikgewogIHJldHVybiBTdHJpbmcodiB8fCAnJykudG9Mb3dlckNhc2UoKQogICAgLnJlcGxhY2UoL9GRL2csICfQtScpCiAgICAucmVwbGFjZSgvW15hLXowLTnQsC3RjzAtOV0rL2dpLCAnICcpCiAgICAucmVwbGFjZSgvXHMrL2csICcgJykKICAgIC50cmltKCk7Cn0KCmZ1bmN0aW9uIGFuaVJlbGVhc2VUZXh0KHIpIHsKICBjb25zdCBuID0gciAmJiByLm5hbWUgfHwge307CiAgcmV0dXJuIFtuLm1haW4sIG4uZW5nbGlzaCwgbi5hbHRlcm5hdGl2ZSwgci5hbGlhcywgci50aXRsZV0uZmlsdGVyKEJvb2xlYW4pLmpvaW4oJyAnKTsKfQoKZnVuY3Rpb24gYW5pRXBpc29kZU51bWJlcihlKSB7CiAgY29uc3Qgbg==...==' | base64 -d > /tmp/patch.py
-          python3 /tmp/patch.py
+        run: python3 .github/workflows/patch_aniliberty.py
       - name: Validate JavaScript
         run: node --check index.js
       - name: Commit integration
@@ -25,8 +23,8 @@ jobs:
           git diff --cached --quiet && { echo 'No changes made'; exit 1; }
           git commit -m 'Add AniLiberty Russian anime source'
           git push
-      - name: Remove temporary workflow
+      - name: Remove temporary integration files
         run: |
-          git rm .github/workflows/add-aniliberty.yml
-          git commit -m 'Remove temporary AniLiberty integration workflow'
+          git rm .github/workflows/add-aniliberty.yml .github/workflows/patch_aniliberty.py
+          git commit -m 'Remove temporary AniLiberty integration files'
           git push

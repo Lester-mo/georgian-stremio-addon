@@ -1,5 +1,8 @@
 name: probe-animeb
 on:
+  push:
+    paths:
+      - '.github/workflows/probe-animeb.yml'
   workflow_dispatch:
 
 jobs:
